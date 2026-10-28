@@ -28,7 +28,7 @@ def lto_from_edb(engine_file, engine_uid, thrust_fractions) -> LTOPerformance:
             'Both --engine-file and --engine-uid must be provided when '
             'using "edb" as the LTO source.'
         )
-    edb_data = EDBEntry.get_engine(engine_file, engine_uid)
+    edb_data = EDBEntry.get_engine(engine_file, engine_uid, strict=False)
     return edb_data.make_lto_performance(thrust_fractions)
 
 
