@@ -50,7 +50,23 @@ _REFERENCE_MACH_LABELS = {
     'maxLim': 'max_lim',
 }
 
-# (Mass, Altitude, Mach) and the discriminator, plus eleven swept values.
+# Columns of a PIANO cruise row. PIANO writes more columns after these
+# (buffet onset and emissions), which the reader does not use.
+IDX_MASS = 0  # Mass [lb]
+IDX_ALT = 1  # Altitude [feet]
+IDX_MACH = 2  # Mach
+IDX_DISCRIMINATOR = 3  # "|" for a swept row, or a reference Mach label
+IDX_TAS = 4  # TAS [knots]
+IDX_CAS = 5  # CAS [knots]
+IDX_DRAG = 6  # Drag [lbf]
+IDX_MCR_PCT = 7  # MCR.% [percent of maximum cruise thrust]
+IDX_LIFT_TO_DRAG = 8  # L/D
+IDX_FUEL_FLOW = 9  # FuelFlow [lb/h]
+IDX_SFC = 10  # SFC [lb/h/lbf]
+IDX_SAR = 11  # SAR [nautical miles/lb]
+IDX_MCL_AVAIL = 12  # MCL/eng avail. [lbf]
+IDX_ROCD_MCL_FIX_MACH = 13  # RoC@MCL fix.Mach [feet/min]
+IDX_ROCD_MCL_FIX_CAS = 14  # RoC@MCL fix.CAS [feet/min]
 _CRUISE_ROW_COLS = 15
 
 _AIRCRAFT_NAME_RE = re.compile(r'Cruise table for\s+(.+?)\s*$')
@@ -99,7 +115,7 @@ def _parse_cruise(path: str) -> tuple[str, TableInput, TableInput]:
         # The fourth column holds the "|" separator or a reference Mach label.
         # If the discriminator is another symbol then raise as this not the
         # expected schema.
-        discriminator = tokens[3]
+        discriminator = tokens[IDX_DISCRIMINATOR]
         is_swept = discriminator == '|'
         row_type = _REFERENCE_MACH_LABELS.get(discriminator)
         if not is_swept and row_type is None:
@@ -110,43 +126,29 @@ def _parse_cruise(path: str) -> tuple[str, TableInput, TableInput]:
                 f'not match the PIANO cruise layout: {line.strip()}'
             )
 
-        mass_lb, altitude_ft, mach = values[0], values[1], values[2]
-        (
-            tas_kts,
-            cas_kts,
-            drag_lbf,
-            mcr_pct,
-            lift_to_drag,
-            fuel_flow_lbh,
-            sfc_lb_h_lbf,
-            sar_nm_lb,
-            mcl_lbf,
-            rocd_mcl_fix_mach_fpm,
-            rocd_mcl_fix_cas_fpm,
-        ) = values[3:]
-
-        fl = altitude_ft / 100
-        mass = mass_lb * POUNDS_TO_KG
+        fl = values[IDX_ALT] / 100
+        mass = values[IDX_MASS] * POUNDS_TO_KG
+        mach = values[IDX_MACH]
         row = [
             fl,
             mass,
             mach,
-            tas_kts * KNOTS_TO_MPS,
-            cas_kts * KNOTS_TO_MPS,
+            values[IDX_TAS] * KNOTS_TO_MPS,
+            values[IDX_CAS] * KNOTS_TO_MPS,
             # Cruise is level flight so rate of climb/descend is 0.
             0.0,
-            fuel_flow_lbh * POUNDS_PER_HOUR_TO_KG_PER_S,
-            drag_lbf * POUNDS_FORCE_TO_NEWTONS,
-            mcr_pct,
-            lift_to_drag,
+            values[IDX_FUEL_FLOW] * POUNDS_PER_HOUR_TO_KG_PER_S,
+            values[IDX_DRAG] * POUNDS_FORCE_TO_NEWTONS,
+            values[IDX_MCR_PCT],
+            values[IDX_LIFT_TO_DRAG],
             # lb/(h.lbf) -> kg/(N.s)
-            sfc_lb_h_lbf * POUNDS_PER_HOUR_TO_KG_PER_S / POUNDS_FORCE_TO_NEWTONS,
+            values[IDX_SFC] * POUNDS_PER_HOUR_TO_KG_PER_S / POUNDS_FORCE_TO_NEWTONS,
             # nm/lb -> m/kg
-            sar_nm_lb * NAUTICAL_MILES_TO_METERS / POUNDS_TO_KG,
-            mcl_lbf * POUNDS_FORCE_TO_NEWTONS,
+            values[IDX_SAR] * NAUTICAL_MILES_TO_METERS / POUNDS_TO_KG,
+            values[IDX_MCL_AVAIL] * POUNDS_FORCE_TO_NEWTONS,
             # PIANO already reports these signed, so keep its sign.
-            rocd_mcl_fix_mach_fpm * FPM_TO_MPS,
-            rocd_mcl_fix_cas_fpm * FPM_TO_MPS,
+            values[IDX_ROCD_MCL_FIX_MACH] * FPM_TO_MPS,
+            values[IDX_ROCD_MCL_FIX_CAS] * FPM_TO_MPS,
         ]
 
         if row_type is not None:
@@ -181,13 +183,17 @@ def _parse_cruise(path: str) -> tuple[str, TableInput, TableInput]:
 def _cruise_values(tokens: list[str]) -> list[float] | None:
     """Parse the numeric columns of a cruise row, or return None.
 
-    The fourth column holds a separator or a label rather than a number, so it
-    is left to the caller.
+    The values keep the column positions of the row, so the `IDX_` constants
+    index them. The discriminator column holds a separator or a label rather
+    than a number, so it is NaN here and left to the caller.
     """
     if len(tokens) < _CRUISE_ROW_COLS:
         return None
     try:
-        return [float(t) for t in tokens[:3] + tokens[4:_CRUISE_ROW_COLS]]
+        return [
+            math.nan if i == IDX_DISCRIMINATOR else float(token)
+            for i, token in enumerate(tokens[:_CRUISE_ROW_COLS])
+        ]
     except ValueError:
         return None
 

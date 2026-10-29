@@ -68,7 +68,14 @@ _CLIMB_SCHEDULE_CROSS_CHECK_TOLERANCE = 0.001
 # crossover of its CAS and Mach up to 0.1%
 _CLIMB_CROSSOVER_CROSS_CHECK_TOLERANCE = 0.001
 
-# Alt., Time, Dist., Burn, FN/eng, R.o.C., Drag
+# Columns of a PIANO climb row, once any NOx column is dropped
+IDX_ALT = 0  # Alt. [feet]
+IDX_TIME = 1  # Time [s], cumulative
+IDX_DIST = 2  # Dist. [nautical miles], cumulative
+IDX_BURN = 3  # Burn [lb], cumulative
+IDX_FN = 4  # FN/eng [lbf]
+IDX_ROCD = 5  # R.o.C. [feet/min]
+IDX_DRAG = 6  # Drag [lbf]
 _CLIMB_ROW_COLS = 7
 
 # The line of column labels that opens a climb table, and the label of the
@@ -131,17 +138,19 @@ def _parse_climb(
         # Cross-check the rows PIANO wrote, before any extrapolated row.
         tas, rocd, d_time, d_distance, d_burn = _derived_columns(rows, schedule)
         _cross_check_tas(label, tas, d_distance, d_time, rocd)
-        _cross_check_fuel_burn(label, rows[-1][3] * POUNDS_TO_KG, block.header_lines)
+        _cross_check_fuel_burn(
+            label, rows[-1][IDX_BURN] * POUNDS_TO_KG, block.header_lines
+        )
 
         halt_ft = _halt_altitude_ft(block)
-        if halt_ft is not None and halt_ft - rows[-1][0] > _HALT_GAP_MIN_FT:
+        if halt_ft is not None and halt_ft - rows[-1][IDX_ALT] > _HALT_GAP_MIN_FT:
             if not extrapolate_to_halt:
                 logger.info(
                     '%s: PIANO halted the climb at %.0f feet, %.0f feet above '
                     'the last row, so the block stops at its last row',
                     label,
                     halt_ft,
-                    halt_ft - rows[-1][0],
+                    halt_ft - rows[-1][IDX_ALT],
                 )
             else:
                 row = _extrapolate_to_halt(label, rows, halt_ft, schedule)
@@ -152,7 +161,7 @@ def _parse_climb(
                         'halt altitude',
                         label,
                         halt_ft,
-                        halt_ft - rows[-1][0],
+                        halt_ft - rows[-1][IDX_ALT],
                     )
                     rows = [*rows, row]
                     extrapolated_points.append((halt_ft / 100, mass))
@@ -160,7 +169,9 @@ def _parse_climb(
                         rows, schedule
                     )
 
-        maximum_altitude_ft = max(maximum_altitude_ft, max(row[0] for row in rows))
+        maximum_altitude_ft = max(
+            maximum_altitude_ft, max(row[IDX_ALT] for row in rows)
+        )
 
         for i, row in enumerate(rows):
             if d_time[i] == 0:
@@ -168,21 +179,21 @@ def _parse_climb(
                     '%s: dropping the row at %.0f feet, which spans no time '
                     'so has no defined fuel flow',
                     label,
-                    row[0],
+                    row[IDX_ALT],
                 )
                 continue
             data.append(
                 [
-                    row[0] / 100,
+                    row[IDX_ALT] / 100,
                     mass,
                     tas[i],
                     rocd[i],
                     d_burn[i] / d_time[i],
-                    row[1],
-                    row[2] * NAUTICAL_MILES_TO_METERS,
-                    row[3] * POUNDS_TO_KG,
-                    row[4] * POUNDS_FORCE_TO_NEWTONS,
-                    row[6] * POUNDS_FORCE_TO_NEWTONS,
+                    row[IDX_TIME],
+                    row[IDX_DIST] * NAUTICAL_MILES_TO_METERS,
+                    row[IDX_BURN] * POUNDS_TO_KG,
+                    row[IDX_FN] * POUNDS_FORCE_TO_NEWTONS,
+                    row[IDX_DRAG] * POUNDS_FORCE_TO_NEWTONS,
                 ]
             )
 
@@ -203,11 +214,11 @@ def _derived_columns(
 ) -> tuple[list[float], list[float], list[float], list[float], list[float]]:
     """TAS [m/s], rate of climb [m/s], and the per-row time [s], distance [m]
     and burn [kg] steps of a climb block."""
-    tas = [_tas_from_schedule(row[0] * FEET_TO_METERS, schedule) for row in rows]
-    rocd = [row[5] * FPM_TO_MPS for row in rows]
-    d_time = _deltas([row[1] for row in rows])
-    d_distance = _deltas([row[2] * NAUTICAL_MILES_TO_METERS for row in rows])
-    d_burn = _deltas([row[3] * POUNDS_TO_KG for row in rows])
+    tas = [_tas_from_schedule(row[IDX_ALT] * FEET_TO_METERS, schedule) for row in rows]
+    rocd = [row[IDX_ROCD] * FPM_TO_MPS for row in rows]
+    d_time = _deltas([row[IDX_TIME] for row in rows])
+    d_distance = _deltas([row[IDX_DIST] * NAUTICAL_MILES_TO_METERS for row in rows])
+    d_burn = _deltas([row[IDX_BURN] * POUNDS_TO_KG for row in rows])
     return tas, rocd, d_time, d_distance, d_burn
 
 
@@ -245,11 +256,14 @@ def _extrapolate_to_halt(
     None if there are fewer than three rows above the crossover, or fewer
     than two fuel flows to fit.
     """
-    above = [row for row in rows if row[0] > schedule.crossover_ft]
+    above = [row for row in rows if row[IDX_ALT] > schedule.crossover_ft]
     fuel_flow = [
-        (rows[i][0], (rows[i][3] - rows[i - 1][3]) / (rows[i][1] - rows[i - 1][1]))
-        for i in range(1, len(rows))
-        if rows[i - 1][0] > schedule.crossover_ft and rows[i][1] != rows[i - 1][1]
+        (
+            row[IDX_ALT],
+            (row[IDX_BURN] - below[IDX_BURN]) / (row[IDX_TIME] - below[IDX_TIME]),
+        )
+        for below, row in zip(rows, rows[1:])
+        if below[IDX_ALT] > schedule.crossover_ft and row[IDX_TIME] != below[IDX_TIME]
     ]
     if len(above) < 3 or len(fuel_flow) < 2:
         logger.warning(
@@ -261,13 +275,17 @@ def _extrapolate_to_halt(
         return None
 
     last = rows[-1]
-    rocd_fpm = _polynomial_through([(row[0], row[5]) for row in above[-2:]])
+    rocd_fpm = _polynomial_through(
+        [(row[IDX_ALT], row[IDX_ROCD]) for row in above[-2:]]
+    )
+    fn_lbf = _polynomial_through([(row[IDX_ALT], row[IDX_FN]) for row in above[-2:]])
+    drag_lbf = _polynomial_through(
+        [(row[IDX_ALT], row[IDX_DRAG]) for row in above[-3:]]
+    )
     values = {
         'rate of climb': rocd_fpm(halt_ft),
-        'net thrust': _polynomial_through([(row[0], row[4]) for row in above[-2:]])(
-            halt_ft
-        ),
-        'drag': _polynomial_through([(row[0], row[6]) for row in above[-3:]])(halt_ft),
+        'net thrust': fn_lbf(halt_ft),
+        'drag': drag_lbf(halt_ft),
         'fuel flow': _polynomial_through(fuel_flow[-2:])(halt_ft),
     }
     for name, value in values.items():
@@ -281,7 +299,7 @@ def _extrapolate_to_halt(
                 value,
             )
 
-    altitude_ft = np.linspace(last[0], halt_ft, _HALT_GAP_INTEGRATION_POINTS)
+    altitude_ft = np.linspace(last[IDX_ALT], halt_ft, _HALT_GAP_INTEGRATION_POINTS)
     with np.errstate(divide='ignore', invalid='ignore'):
         rocd_mps = np.array([rocd_fpm(h) for h in altitude_ft]) * FPM_TO_MPS
         dt_dh = FEET_TO_METERS / rocd_mps
@@ -292,15 +310,15 @@ def _extrapolate_to_halt(
         d_time = float(np.trapezoid(dt_dh, altitude_ft))
         d_distance_m = float(np.trapezoid(ground_speed * dt_dh, altitude_ft))
 
-    return [
-        halt_ft,
-        last[1] + d_time,
-        last[2] + d_distance_m / NAUTICAL_MILES_TO_METERS,
-        last[3] + values['fuel flow'] * d_time,
-        values['net thrust'],
-        values['rate of climb'],
-        values['drag'],
-    ]
+    row = [0.0] * _CLIMB_ROW_COLS
+    row[IDX_ALT] = halt_ft
+    row[IDX_TIME] = last[IDX_TIME] + d_time
+    row[IDX_DIST] = last[IDX_DIST] + d_distance_m / NAUTICAL_MILES_TO_METERS
+    row[IDX_BURN] = last[IDX_BURN] + values['fuel flow'] * d_time
+    row[IDX_FN] = values['net thrust']
+    row[IDX_ROCD] = values['rate of climb']
+    row[IDX_DRAG] = values['drag']
+    return row
 
 
 def _polynomial_through(points: list[tuple[float, float]]):
