@@ -49,6 +49,9 @@ _INLINE_COMMENTS = {
     'number_of_engines': 'Number of engines',
     'APU_name': 'None: APU emissions not calculated',
     'operating_empty_mass_kg': 'kg',
+    'climb_extrapolated_points': (
+        '(fl, mass [kg]) of climb rows extrapolated to the PIANO halt altitude'
+    ),
 }
 
 _COL_COMMENTS = {
@@ -123,6 +126,7 @@ LEGACY_WRITE_SPEC = (*_COMMON_HEAD_SPEC, *_COMMON_TAIL_SPEC, *_PHASE_TABLE_SPEC)
 PIANO_WRITE_SPEC = (
     *_COMMON_HEAD_SPEC,
     ('operating_empty_mass_kg', 'operating_empty_mass_kg'),
+    ('climb_extrapolated_points', 'climb_extrapolated_points'),
     *_COMMON_TAIL_SPEC,
     *_PHASE_TABLE_SPEC,
     ('cruise_reference_mach', 'cruise_reference_mach'),
@@ -484,6 +488,7 @@ def build_piano_model(
         descent_flight_performance=piano_data.descent.model_dump(),
         cruise_reference_mach=piano_data.cruise_reference_mach,
         descent_idle_thrust=piano_data.descent_idle_thrust,
+        climb_extrapolated_points=piano_data.climb_extrapolated_points,
         hold_flight_performance=HoldPerformance(
             fuel_flow=hold_fuel_flow_lbperh * POUNDS_PER_HOUR_TO_KG_PER_S
         ),

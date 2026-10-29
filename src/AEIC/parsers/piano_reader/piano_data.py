@@ -61,6 +61,10 @@ class PianoData:
     climb: TableInput
     """Climb performance table."""
 
+    climb_extrapolated_points: list[tuple[float, float]]
+    """(Flight level, mass [kg]) of each climb row extrapolated to the
+    altitude at which PIANO halted the climb."""
+
     cruise: TableInput
     """Cruise performance table."""
 
@@ -81,6 +85,7 @@ class PianoData:
         descent_file: str,
         *,
         overrides: PianoOverrides | None = None,
+        extrapolate_climb_to_halt: bool = True,
     ) -> Self:
         """Read a set of PIANO cruise, climb and descent exports.
 
@@ -89,6 +94,8 @@ class PianoData:
             climb_file: Path to the PIANO climb details export.
             descent_file: Path to the PIANO descent details export.
             overrides: Values PIANO does not always write to the files.
+            extrapolate_climb_to_halt: Extrapolate each climb block that
+                halted above its last row to its halt altitude.
 
         Raises:
             ValueError: If the files cannot be parsed, if the climb mass count
@@ -98,8 +105,8 @@ class PianoData:
         overrides = overrides if overrides is not None else PianoOverrides()
 
         aircraft_name, cruise, reference_mach = _parse_cruise(cruise_file)
-        climb_speeds, isa_offset, maximum_altitude_ft, climb = _parse_climb(
-            climb_file, overrides
+        climb_speeds, isa_offset, maximum_altitude_ft, climb, extrapolated = (
+            _parse_climb(climb_file, overrides, extrapolate_climb_to_halt)
         )
         descent_speeds, descent, idle_thrust = _parse_descent(descent_file)
 
@@ -110,6 +117,7 @@ class PianoData:
             climb_speeds=climb_speeds,
             descent_speeds=descent_speeds,
             climb=climb,
+            climb_extrapolated_points=extrapolated,
             cruise=cruise,
             descent=descent,
             cruise_reference_mach=reference_mach,

@@ -7,6 +7,8 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from AEIC.parsers.piano_reader.common import (
     _ATC_FL_CAS_LOW,
     _Block,
@@ -78,6 +80,14 @@ _CLIMB_MASS_RE = re.compile(r'Initial mass\s+([\d.]+)')
 _DELTA_ISA_RE = re.compile(r'Delta-ISA\s+([+-]?[\d.]+)')
 _HALTED_RE = re.compile(r'halted at\s+([\d.]+)feet')
 
+# A halted block whose last row is more than this below the halt altitude
+# gets an extra row extrapolated to the halt altitude [feet]
+_HALT_GAP_MIN_FT = 10.0
+
+# Number of altitude points for the integration of time and distance from the
+# last row to the halt altitude
+_HALT_GAP_INTEGRATION_POINTS = 101
+
 
 # ---------------------------------------------------------------------------
 # Climb
@@ -85,12 +95,17 @@ _HALTED_RE = re.compile(r'halted at\s+([\d.]+)feet')
 
 
 def _parse_climb(
-    path: str, overrides: PianoOverrides
-) -> tuple[SpeedData, int, int, TableInput]:
+    path: str, overrides: PianoOverrides, extrapolate_to_halt: bool = True
+) -> tuple[SpeedData, int, int, TableInput, list[tuple[float, float]]]:
     """Parse a PIANO climb details export.
 
+    If `extrapolate_to_halt` is set, a block whose climb halted more than
+    `_HALT_GAP_MIN_FT` above its last row gets an extra row at the halt
+    altitude. See `_extrapolate_to_halt`.
+
     Returns the climb speed schedule, the ISA offset, the highest altitude
-    reached by any block, and the climb table.
+    reached by any block, the climb table, and the (flight level, mass [kg])
+    of each extrapolated row.
     """
     lines = _read_lines(path)
     nox_col = _nox_column(lines)
@@ -101,14 +116,8 @@ def _parse_climb(
     masses = _climb_masses(blocks, overrides)
     schedule = _climb_schedule(blocks, overrides)
 
-    for match in (_HALTED_RE.search(line) for line in lines):
-        if match is not None:
-            logger.info(
-                'PIANO climb halted at %s feet, so the block stops there',
-                match.group(1).rstrip('.'),
-            )
-
     data = []
+    extrapolated_points = []
     maximum_altitude_ft = 0.0
     for n, (block, mass) in enumerate(zip(blocks, masses, strict=True)):
         label = f'Climb block {n + 1}'
@@ -119,18 +128,39 @@ def _parse_climb(
             logger.warning('%s: no data rows', label)
             continue
 
-        altitude_ft = [row[0] for row in rows]
-        maximum_altitude_ft = max(maximum_altitude_ft, max(altitude_ft))
-        altitude_m = [ft * FEET_TO_METERS for ft in altitude_ft]
-        tas = [_tas_from_schedule(alt, schedule) for alt in altitude_m]
-        rocd = [row[5] * FPM_TO_MPS for row in rows]
-
-        d_time = _deltas([row[1] for row in rows])
-        d_distance = _deltas([row[2] * NAUTICAL_MILES_TO_METERS for row in rows])
-        d_burn = _deltas([row[3] * POUNDS_TO_KG for row in rows])
-
+        # Cross-check the rows PIANO wrote, before any extrapolated row.
+        tas, rocd, d_time, d_distance, d_burn = _derived_columns(rows, schedule)
         _cross_check_tas(label, tas, d_distance, d_time, rocd)
         _cross_check_fuel_burn(label, rows[-1][3] * POUNDS_TO_KG, block.header_lines)
+
+        halt_ft = _halt_altitude_ft(block)
+        if halt_ft is not None and halt_ft - rows[-1][0] > _HALT_GAP_MIN_FT:
+            if not extrapolate_to_halt:
+                logger.info(
+                    '%s: PIANO halted the climb at %.0f feet, %.0f feet above '
+                    'the last row, so the block stops at its last row',
+                    label,
+                    halt_ft,
+                    halt_ft - rows[-1][0],
+                )
+            else:
+                row = _extrapolate_to_halt(label, rows, halt_ft, schedule)
+                if row is not None:
+                    logger.info(
+                        '%s: PIANO halted the climb at %.0f feet, %.0f feet '
+                        'above the last row, so a row is extrapolated to the '
+                        'halt altitude',
+                        label,
+                        halt_ft,
+                        halt_ft - rows[-1][0],
+                    )
+                    rows = [*rows, row]
+                    extrapolated_points.append((halt_ft / 100, mass))
+                    tas, rocd, d_time, d_distance, d_burn = _derived_columns(
+                        rows, schedule
+                    )
+
+        maximum_altitude_ft = max(maximum_altitude_ft, max(row[0] for row in rows))
 
         for i, row in enumerate(rows):
             if d_time[i] == 0:
@@ -164,7 +194,129 @@ def _parse_climb(
         isa_offset,
         int(maximum_altitude_ft),
         table,
+        extrapolated_points,
     )
+
+
+def _derived_columns(
+    rows: list[list[float]], schedule: _Schedule
+) -> tuple[list[float], list[float], list[float], list[float], list[float]]:
+    """TAS [m/s], rate of climb [m/s], and the per-row time [s], distance [m]
+    and burn [kg] steps of a climb block."""
+    tas = [_tas_from_schedule(row[0] * FEET_TO_METERS, schedule) for row in rows]
+    rocd = [row[5] * FPM_TO_MPS for row in rows]
+    d_time = _deltas([row[1] for row in rows])
+    d_distance = _deltas([row[2] * NAUTICAL_MILES_TO_METERS for row in rows])
+    d_burn = _deltas([row[3] * POUNDS_TO_KG for row in rows])
+    return tas, rocd, d_time, d_distance, d_burn
+
+
+def _halt_altitude_ft(block: _Block) -> float | None:
+    """Altitude at which PIANO halted a block's climb [feet], or None if the
+    climb reached its target. PIANO writes the halt message just before the
+    table of the block it applies to, so it is in that block's header lines."""
+    match = _find(_HALTED_RE, block.header_lines)
+    return None if match is None else float(match.group(1).rstrip('.'))
+
+
+def _extrapolate_to_halt(
+    label: str, rows: list[list[float]], halt_ft: float, schedule: _Schedule
+) -> list[float] | None:
+    """Extrapolate a halted climb block to its halt altitude.
+
+    PIANO halts a climb when its rate of climb gets too low, but its table
+    stops at a lower altitude. The halt altitude is one the climb reached, so
+    a row there extends the block without going past the data.
+
+    The fit uses the rows above the crossover, where the climb is at constant
+    Mach:
+
+    - Rate of climb, net thrust and fuel flow are linear through the last two
+      rows. Fuel flow is the burn over the time of the interval that ends at
+      a row, as the parser stores it. The fit skips the interval that spans
+      the crossover, and intervals that span no time.
+    - Drag is quadratic through the last three rows, because it passes
+      through a minimum near the ceiling.
+    - Time is the integral of dh / ROCD from the last row, distance is the
+      integral of the ground speed over that time, and burn is the fuel flow
+      times that time.
+
+    Returns the row in the units and column order of the PIANO table, or
+    None if there are fewer than three rows above the crossover, or fewer
+    than two fuel flows to fit.
+    """
+    above = [row for row in rows if row[0] > schedule.crossover_ft]
+    fuel_flow = [
+        (rows[i][0], (rows[i][3] - rows[i - 1][3]) / (rows[i][1] - rows[i - 1][1]))
+        for i in range(1, len(rows))
+        if rows[i - 1][0] > schedule.crossover_ft and rows[i][1] != rows[i - 1][1]
+    ]
+    if len(above) < 3 or len(fuel_flow) < 2:
+        logger.warning(
+            '%s: too few rows at constant Mach to extrapolate the climb to '
+            'the halt altitude of %.0f feet',
+            label,
+            halt_ft,
+        )
+        return None
+
+    last = rows[-1]
+    rocd_fpm = _polynomial_through([(row[0], row[5]) for row in above[-2:]])
+    values = {
+        'rate of climb': rocd_fpm(halt_ft),
+        'net thrust': _polynomial_through([(row[0], row[4]) for row in above[-2:]])(
+            halt_ft
+        ),
+        'drag': _polynomial_through([(row[0], row[6]) for row in above[-3:]])(halt_ft),
+        'fuel flow': _polynomial_through(fuel_flow[-2:])(halt_ft),
+    }
+    for name, value in values.items():
+        if value < 0:
+            logger.warning(
+                '%s: extrapolated %s at the halt altitude of %.0f feet is '
+                'negative (%g)',
+                label,
+                name,
+                halt_ft,
+                value,
+            )
+
+    altitude_ft = np.linspace(last[0], halt_ft, _HALT_GAP_INTEGRATION_POINTS)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rocd_mps = np.array([rocd_fpm(h) for h in altitude_ft]) * FPM_TO_MPS
+        dt_dh = FEET_TO_METERS / rocd_mps
+        tas = np.array(
+            [_tas_from_schedule(h * FEET_TO_METERS, schedule) for h in altitude_ft]
+        )
+        ground_speed = np.sqrt(tas**2 - rocd_mps**2)
+        d_time = float(np.trapezoid(dt_dh, altitude_ft))
+        d_distance_m = float(np.trapezoid(ground_speed * dt_dh, altitude_ft))
+
+    return [
+        halt_ft,
+        last[1] + d_time,
+        last[2] + d_distance_m / NAUTICAL_MILES_TO_METERS,
+        last[3] + values['fuel flow'] * d_time,
+        values['net thrust'],
+        values['rate of climb'],
+        values['drag'],
+    ]
+
+
+def _polynomial_through(points: list[tuple[float, float]]):
+    """The polynomial of lowest degree through `points`, as a function."""
+
+    def evaluate(x: float) -> float:
+        total = 0.0
+        for j, (xj, yj) in enumerate(points):
+            term = yj
+            for m, (xm, _) in enumerate(points):
+                if m != j:
+                    term *= (x - xm) / (xj - xm)
+            total += term
+        return total
+
+    return evaluate
 
 
 def _nox_column(lines: list[str]) -> int | None:

@@ -71,6 +71,10 @@ class PianoPerformanceModel(BasePerformanceModel[PianoFlightRules]):
     descent_idle_thrust: TableInput | None = None
     """Altitude below which each descent block flies at idle thrust."""
 
+    climb_extrapolated_points: list[tuple[float, float]] = []
+    """(Flight level, mass [kg]) of each climb row extrapolated to the
+    altitude at which PIANO halted the climb, rather than read from PIANO."""
+
     operating_empty_mass_kg: PositiveFloat
     """Operating empty mass [kg].
 

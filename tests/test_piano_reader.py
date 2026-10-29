@@ -16,7 +16,8 @@ import pytest
 
 from AEIC.config import config
 from AEIC.parsers.piano_reader import PianoData, PianoOverrides
-from AEIC.parsers.piano_reader.climb_reader import CLIMB_COLS
+from AEIC.parsers.piano_reader.climb_reader import CLIMB_COLS, _extrapolate_to_halt
+from AEIC.parsers.piano_reader.common import _Schedule
 from AEIC.parsers.piano_reader.cruise_reader import (
     CRUISE_COLS,
     CRUISE_REFERENCE_MACH_COLS,
@@ -548,3 +549,114 @@ def test_climb_extra_column_that_is_not_nox_raises(tmp_path):
 
     with pytest.raises(ValueError, match='do not hold 7 numbers'):
         _load_climb(climb_file)
+
+
+# ---------------------------------------------------------------------------
+# Extrapolation of a halted climb to its halt altitude
+# ---------------------------------------------------------------------------
+
+SCHEDULE = _Schedule(
+    cas_low_kts=250.0, cas_high_kts=280.0, mach=0.75, crossover_ft=30523.0
+)
+"""280 kcas and Mach 0.750 cross over at 30523 feet."""
+
+
+def _rocd_fpm(h: float) -> float:
+    return 1000.0 - 0.2 * (h - 31000.0)
+
+
+def _fn_lbf(h: float) -> float:
+    return 8000.0 - 0.5 * (h - 31000.0)
+
+
+def _drag_lbf(h: float) -> float:
+    return 10000.0 + 1.0e-4 * (h - 32000.0) ** 2
+
+
+def _fuel_flow_lbps(h: float) -> float:
+    return 2.0 - 1.0e-4 * (h - 31000.0)
+
+
+def _synthetic_rows(altitudes_ft: list[float]) -> list[list[float]]:
+    """Climb rows in PIANO units on known functions of altitude.
+
+    Each interval takes 100 s, and burns the fuel flow at its upper row over
+    that time, so the backward-difference fuel flow of each row is exact. The
+    first row is off every trend, so a fit that uses it fails the tests.
+    """
+    rows = [[altitudes_ft[0], 0.0, 0.0, 0.0, 99999.0, 9999.0, 99999.0]]
+    for h in altitudes_ft[1:]:
+        time, distance, burn = rows[-1][1:4]
+        rows.append(
+            [
+                h,
+                time + 100.0,
+                distance + 10.0,
+                burn + 100.0 * _fuel_flow_lbps(h),
+                _fn_lbf(h),
+                _rocd_fpm(h),
+                _drag_lbf(h),
+            ]
+        )
+    return rows
+
+
+def test_extrapolate_to_halt_follows_the_fitted_forms():
+    """Rate of climb, thrust and fuel flow are linear and drag is quadratic,
+    so the extrapolation reproduces them. Time is the integral of dh / ROCD,
+    and burn is the fuel flow times that time."""
+    rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0, 34000.0])
+
+    row = _extrapolate_to_halt('block', rows, 35000.0, SCHEDULE)
+
+    assert row is not None
+    altitude, time, distance, burn, fn, rocd, drag = row
+    assert altitude == 35000.0
+    assert rocd == pytest.approx(_rocd_fpm(35000.0))
+    assert fn == pytest.approx(_fn_lbf(35000.0))
+    assert drag == pytest.approx(_drag_lbf(35000.0))
+
+    # dh / ROCD for a rate of climb linear from 400 to 200 ft/min over 1000 ft.
+    d_time = 60.0 * 1000.0 / (200.0 - 400.0) * math.log(200.0 / 400.0)
+    assert time == pytest.approx(rows[-1][1] + d_time, rel=1e-4)
+    assert burn == pytest.approx(
+        rows[-1][3] + _fuel_flow_lbps(35000.0) * d_time, rel=1e-4
+    )
+
+    # The climb is at constant Mach and close to level, so the ground speed is
+    # close to the TAS at the middle of the step.
+    tas_kts = 0.75 * speed_of_sound_at_altitude(34500.0 * FEET_TO_METERS)
+    tas_kts /= KNOTS_TO_MPS
+    assert distance - rows[-1][2] == pytest.approx(tas_kts * d_time / 3600, rel=1e-2)
+
+
+def test_extrapolate_to_halt_needs_two_usable_fuel_flows(caplog):
+    """Three rows are above the crossover, so rate of climb, thrust and drag
+    could be fitted. But the fuel flow of the first one is the burn over an
+    interval that starts below the crossover, and the last interval spans no
+    time. No usable fuel flow is left but one, which is too few to fit."""
+    rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0])
+    rows[-1][1] = rows[-2][1]
+
+    with caplog.at_level(logging.WARNING, logger='AEIC.parsers.piano_reader'):
+        row = _extrapolate_to_halt('block', rows, 34000.0, SCHEDULE)
+
+    assert row is None
+    assert any('too few rows' in r.getMessage() for r in caplog.records)
+
+
+def test_extrapolate_to_halt_keeps_and_warns_a_negative_value(caplog):
+    """The rate of climb reaches zero at 36000 feet, so it is negative at a
+    halt altitude above that. It is not clamped."""
+    rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0, 34000.0])
+
+    with caplog.at_level(logging.WARNING, logger='AEIC.parsers.piano_reader'):
+        row = _extrapolate_to_halt('block', rows, 36500.0, SCHEDULE)
+
+    assert row is not None
+    assert row[5] == pytest.approx(_rocd_fpm(36500.0))
+    assert row[5] < 0
+    assert any(
+        'extrapolated rate of climb' in r.getMessage() and 'negative' in r.getMessage()
+        for r in caplog.records
+    )
