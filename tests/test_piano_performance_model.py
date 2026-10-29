@@ -6,6 +6,7 @@ model loader and returns its tabulated values, but do not check that its
 numbers are physically plausible.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -187,7 +188,7 @@ def test_evaluate_at_every_cruise_row_returns_the_tabulated_values(build):
 
     # Some fixture rows have a negative climb potential, so turn off the check.
     for row in _rows(model.cruise_flight_performance):
-        rules = PianoConstantMachCruise(row['mach'], min_rocd_mcl_mach=None)
+        rules = PianoConstantMachCruise(row['mach'], min_rocd_mcl_mach=-math.inf)
         _assert_tabulated(model.evaluate(_state(row), rules), row)
 
 

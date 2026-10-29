@@ -12,13 +12,11 @@ import pytest
 from AEIC.performance.model_builder import (
     WRITE_SPECS,
     build_legacy_model,
-    build_piano_model,
     write_performance_model,
 )
 from AEIC.performance.models import (
     LegacyPerformanceModel,
     PerformanceModel,
-    PianoPerformanceModel,
 )
 from AEIC.performance.types import TableInput
 
@@ -27,20 +25,6 @@ MODEL_TYPES = list(WRITE_SPECS)
 
 class _UnregisteredModel(LegacyPerformanceModel):
     """A model type with no entry in `WRITE_SPECS`."""
-
-
-@pytest.fixture
-def piano_model(piano_data, lto) -> PianoPerformanceModel:
-    return build_piano_model(
-        piano_data,
-        lto,
-        aircraft_class='narrow',
-        number_of_engines=2,
-        maximum_payload=18000,
-        operating_empty_mass=37100,
-        hold_fuel_flow_lbperh=5000.0,
-        apu_name='APU 131-9',
-    )
 
 
 @pytest.fixture

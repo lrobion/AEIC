@@ -246,13 +246,13 @@ class PianoConstantMachCruise:
     mach: float
     """Cruise Mach number."""
 
-    min_rocd_mcl_mach: float | None = 0.0
+    min_rocd_mcl_mach: float = 0.0
     """Minimum rate of climb at maximum climb (MCL) thrust and constant Mach
     in cruise [m/s].
 
     If the climb potential at a cruise state is lower, `evaluate` raises
     `ValueError`. The default of 0 refuses states where the aircraft cannot
-    hold level flight at MCL thrust. Set `None` to turn off the check.
+    hold level flight at MCL thrust. Set `-math.inf` to turn off the check.
     """
 
 

@@ -1,7 +1,9 @@
 # TODO: Remove this when we move to Python 3.14+.
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 
 import numpy as np
@@ -65,6 +67,7 @@ class AdjustableLegacyContext(Context):
         divert_distance: ContextAdjustment = None,
         hold_time: ContextAdjustment = None,
         cruise_mach: ContextAdjustment = None,
+        min_rocd_mcl_mach: ContextAdjustment = None,
     ):
         """Adjustment parameters (a "simple" adjustment is one that takes no
         additional arguments beyond the context, mission and performance
@@ -104,6 +107,12 @@ class AdjustableLegacyContext(Context):
           provided, cruise uses `SimpleFlightRules.CRUISE`.
           Not supported by legacy performance models.
           Required by performance models with a Mach-swept cruise table (PIANO).
+
+        - `min_rocd_mcl_mach`: Simple adjustment for the minimum rate of climb
+          at maximum climb thrust in cruise. If not provided, cruise uses the
+          default of `PianoConstantMachCruise.min_rocd_mcl_mach`. Give
+          `-math.inf` to turn off the check.
+          Not supported by legacy performance models.
         """
 
         # The context constructor calculates all of the fixed information used
@@ -204,18 +213,43 @@ class AdjustableLegacyContext(Context):
         # cruise table.
         self.cruise_rules: SimpleFlightRules | PianoConstantMachCruise
 
+        # Rules for cruise evaluations that only estimate values, such as the
+        # starting mass. These evaluations are not flown states.
+        self.cruise_estimate_rules: SimpleFlightRules | PianoConstantMachCruise
+
         if isinstance(ac_performance, PianoPerformanceModel):
             if cruise_mach is None:
                 raise ValueError('PIANO performance models require a cruise Mach')
             self.cruise_rules = PianoConstantMachCruise(
                 mach=self.apply_adjustment(cruise_mach, mission, ac_performance)
             )
+            if min_rocd_mcl_mach is not None:
+                self.cruise_rules = replace(
+                    self.cruise_rules,
+                    min_rocd_mcl_mach=self.apply_adjustment(
+                        min_rocd_mcl_mach, mission, ac_performance
+                    ),
+                )
+            # The starting mass estimate uses the maximum table mass, so it
+            # skips the climb potential check, otherwise trajectories that
+            # could fly given their converged starting mass would fail because
+            # the first point of the starting mass estimation would be too
+            # heavy and fail.
+            self.cruise_estimate_rules = replace(
+                self.cruise_rules, min_rocd_mcl_mach=-math.inf
+            )
         elif cruise_mach is not None:
             raise ValueError(
                 f'cruise_mach is not supported by {ac_performance.model_type}'
             )
+        elif min_rocd_mcl_mach is not None:
+            raise ValueError(
+                f'min_rocd_mcl_mach is not supported by {ac_performance.model_type}'
+            )
         else:
+            # Non-PIANO models just use the default cruise rules
             self.cruise_rules = SimpleFlightRules.CRUISE
+            self.cruise_estimate_rules = self.cruise_rules
 
         # Initialize weather regridding when requested.
         self.weather: Weather | None = None
@@ -295,7 +329,7 @@ class AdjustableLegacyBuilder(Builder):
                 altitude=self.crz_start_altitude,
                 aircraft_mass='max',
             ),
-            self.cruise_rules,
+            self.cruise_estimate_rules,
         )
 
         # Figure out startingMass components per AEIC v2:

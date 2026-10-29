@@ -223,7 +223,7 @@ class PianoPerformanceModel(BasePerformanceModel[PianoFlightRules]):
         # MCL thrust, so the aircraft cannot hold level flight at this Mach.
         rocd_mcl = values['rocd_mcl_fix_mach']
         minimum = rules.min_rocd_mcl_mach
-        if minimum is not None and rocd_mcl < minimum:
+        if rocd_mcl < minimum:
             raise ValueError(
                 f'cruise at FL{state.altitude * METERS_TO_FL:.0f}, '
                 f'mass {state.aircraft_mass} kg, Mach {rules.mach}: rate of '
