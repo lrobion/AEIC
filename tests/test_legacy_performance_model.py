@@ -14,7 +14,12 @@ from AEIC.performance.model_builder import (
     write_performance_model,
 )
 from AEIC.performance.models import LegacyPerformanceModel, PerformanceModel
-from AEIC.performance.types import AircraftState, CruiseMach, SpeedData, Speeds
+from AEIC.performance.types import (
+    AircraftState,
+    PianoConstantMachCruise,
+    SpeedData,
+    Speeds,
+)
 
 # Column index in the table `build_performance_table` returns.
 FL, MASS, TAS, ROCD, FUEL_FLOW = range(5)
@@ -249,4 +254,4 @@ def test_legacy_model_refuses_cruise_mach_rules(performance_model):
     state = AircraftState(altitude=1828.8, aircraft_mass='min')
 
     with pytest.raises(TypeError):
-        performance_model.evaluate(state, CruiseMach(0.78))
+        performance_model.evaluate(state, PianoConstantMachCruise(0.78))

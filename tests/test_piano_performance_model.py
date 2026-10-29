@@ -24,8 +24,8 @@ from AEIC.performance.model_builder import build_piano_model, write_performance_
 from AEIC.performance.models import PerformanceModel, PianoPerformanceModel
 from AEIC.performance.types import (
     AircraftState,
-    CruiseMach,
     Performance,
+    PianoConstantMachCruise,
     SimpleFlightRules,
     TableInput,
 )
@@ -185,8 +185,10 @@ def test_evaluate_at_every_climb_or_descent_row_returns_the_tabulated_values(
 def test_evaluate_at_every_cruise_row_returns_the_tabulated_values(build):
     model = build()
 
+    # Some fixture rows have a negative climb potential, so turn off the check.
     for row in _rows(model.cruise_flight_performance):
-        _assert_tabulated(model.evaluate(_state(row), CruiseMach(row['mach'])), row)
+        rules = PianoConstantMachCruise(row['mach'], min_rocd_mcl_mach=None)
+        _assert_tabulated(model.evaluate(_state(row), rules), row)
 
 
 def test_cruise_between_two_mach_points_is_between_the_tabulated_values(build):
@@ -206,7 +208,9 @@ def test_cruise_between_two_mach_points_is_between_the_tabulated_values(build):
         and a['fuel_flow'] != b['fuel_flow']
     )
 
-    perf = model.evaluate(_state(low), CruiseMach((low['mach'] + high['mach']) / 2))
+    perf = model.evaluate(
+        _state(low), PianoConstantMachCruise((low['mach'] + high['mach']) / 2)
+    )
 
     # At the midpoint Mach, linear interpolation gives the mean of the rows.
     for attr, col in (('true_airspeed', 'tas'), ('fuel_flow', 'fuel_flow')):
@@ -214,11 +218,39 @@ def test_cruise_between_two_mach_points_is_between_the_tabulated_values(build):
         assert getattr(perf, attr) == pytest.approx(mean, rel=1e-12)
 
 
+def test_cruise_without_climb_potential_is_refused(build):
+    model = build()
+    # Get first row with negative climb potential
+    row = next(
+        r for r in _rows(model.cruise_flight_performance) if r['rocd_mcl_fix_mach'] < 0
+    )
+
+    # By default we require that MCL > 0 so should throw
+    with pytest.raises(ValueError, match='rate of climb at MCL thrust'):
+        model.evaluate(_state(row), PianoConstantMachCruise(row['mach']))
+
+
+def test_cruise_climb_potential_minimum_comes_from_the_rules(build):
+    model = build()
+    # Get first row with positive climb potential
+    row = next(
+        r for r in _rows(model.cruise_flight_performance) if r['rocd_mcl_fix_mach'] > 0
+    )
+
+    model.evaluate(_state(row), PianoConstantMachCruise(row['mach']))
+    # Make minimum +1 of whatever we got, should throw
+    rules = PianoConstantMachCruise(
+        row['mach'], min_rocd_mcl_mach=row['rocd_mcl_fix_mach'] + 1.0
+    )
+    with pytest.raises(ValueError, match='rate of climb at MCL thrust'):
+        model.evaluate(_state(row), rules)
+
+
 def test_simple_cruise_rules_are_refused_with_a_pointer_to_cruise_mach(build):
     model = build()
     row = _rows(model.cruise_flight_performance)[0]
 
-    with pytest.raises(ValueError, match='CruiseMach'):
+    with pytest.raises(ValueError, match='PianoConstantMachCruise'):
         model.evaluate(_state(row), SimpleFlightRules.CRUISE)
 
 

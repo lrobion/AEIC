@@ -106,6 +106,28 @@ def test_extra_data_columns_are_ignored():
     assert table.interpolate(state(0.0, 60000.0)) == Performance(100.0, 20.0, 2.0)
 
 
+def test_extra_outputs_are_interpolated_by_name():
+    # Add an extra column to the row
+    rows = [[*row, 10.0 * i] for i, row in enumerate(CLIMB_ROWS)]
+    ptin = PerformanceTableInput(cols=[*CLIMB_COLS, 'extra'], data=rows)
+    table = RaggedPerformanceTable.from_input(
+        ptin, ROCDFilter.POSITIVE, CLIMB_AXES, extra_outputs=('extra',)
+    )
+
+    # FL 50 is halfway between FL 0 and FL 100 on the lighter mass.
+    assert table.interpolate_values(state(50.0, 60000.0)) == pytest.approx(
+        {'tas': 125.0, 'rocd': 17.5, 'fuel_flow': 1.75, 'extra': 5.0}, rel=1e-12
+    )
+
+
+def test_missing_extra_output_column_raises():
+    ptin = PerformanceTableInput(cols=CLIMB_COLS, data=CLIMB_ROWS)
+    with pytest.raises(ValueError, match='"extra"'):
+        RaggedPerformanceTable.from_input(
+            ptin, ROCDFilter.POSITIVE, CLIMB_AXES, extra_outputs=('extra',)
+        )
+
+
 @pytest.mark.parametrize(
     ('mass', 'expected'),
     [('min', (125.0, 17.5, 1.75)), ('max', (140.0, 12.0, 2.0))],

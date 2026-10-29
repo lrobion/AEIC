@@ -9,7 +9,11 @@ import numpy as np
 from AEIC.config import config
 from AEIC.missions import Mission
 from AEIC.performance.models import LegacyPerformanceModel, PianoPerformanceModel
-from AEIC.performance.types import AircraftState, CruiseMach, SimpleFlightRules
+from AEIC.performance.types import (
+    AircraftState,
+    PianoConstantMachCruise,
+    SimpleFlightRules,
+)
 from AEIC.storage import FlightPhase
 from AEIC.units import (
     FEET_TO_METERS,
@@ -198,12 +202,12 @@ class AdjustableLegacyContext(Context):
 
         # A cruise Mach is only compatible with models with a Mach-swept
         # cruise table.
-        self.cruise_rules: SimpleFlightRules | CruiseMach
+        self.cruise_rules: SimpleFlightRules | PianoConstantMachCruise
 
         if isinstance(ac_performance, PianoPerformanceModel):
             if cruise_mach is None:
                 raise ValueError('PIANO performance models require a cruise Mach')
-            self.cruise_rules = CruiseMach(
+            self.cruise_rules = PianoConstantMachCruise(
                 mach=self.apply_adjustment(cruise_mach, mission, ac_performance)
             )
         elif cruise_mach is not None:

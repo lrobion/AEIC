@@ -261,19 +261,24 @@ class RaggedPerformanceTable:
     rocd_filter: ROCDFilter
     """ROCD filter for this flight phase."""
 
+    extra_outputs: tuple[str, ...] = ()
+    """Additional columns to interpolate. Only `interpolate_values` returns
+    them."""
+
     _interpolator: RaggedInterpolator = field(init=False, repr=False)
     """Interpolator over the table data."""
 
     OUTPUTS: ClassVar[tuple[str, ...]] = ('tas', 'rocd', 'fuel_flow')
-    """Columns returned in `Performance`."""
+    """Columns returned in `Performance` by `interpolate`."""
 
     ZERO_ROCD_TOL: ClassVar[float] = 1.0e-6
     """Tolerance for zero rate of climb/descent comparisons."""
 
     def __post_init__(self):
         phase = self.phase
+        outputs = (*self.OUTPUTS, *self.extra_outputs)
 
-        for col in (*self.axes, *self.OUTPUTS):
+        for col in (*self.axes, *outputs):
             if col not in self.df.columns:
                 raise ValueError(f'Missing "{col}" column in {phase} performance table')
 
@@ -282,7 +287,7 @@ class RaggedPerformanceTable:
                 f'{phase} performance table has duplicate {self.axes} keys'
             )
 
-        if self.df[list(self.OUTPUTS)].isna().any().any():
+        if self.df[list(outputs)].isna().any().any():
             raise ValueError(f'{phase} performance table has NaN output values')
 
         # Check the sign of the ROCD values in the table matches the ROCD
@@ -308,7 +313,7 @@ class RaggedPerformanceTable:
                     )
 
         self.df = self.df.sort_values(list(self.axes), kind='stable', ignore_index=True)
-        self._interpolator = RaggedInterpolator(self.df, self.axes, self.OUTPUTS, phase)
+        self._interpolator = RaggedInterpolator(self.df, self.axes, outputs, phase)
 
     @classmethod
     def from_input(
@@ -316,6 +321,7 @@ class RaggedPerformanceTable:
         ptin: PerformanceTableInput,
         rocd_filter: ROCDFilter,
         axes: tuple[str, ...],
+        extra_outputs: tuple[str, ...] = (),
     ) -> Self:
         """Convert performance table data from the TOML input format."""
 
@@ -324,7 +330,9 @@ class RaggedPerformanceTable:
         df = pd.DataFrame(
             [row[: len(ptin.cols)] for row in ptin.data], columns=np.array(ptin.cols)
         )
-        return cls(df=df, axes=axes, rocd_filter=rocd_filter)
+        return cls(
+            df=df, axes=axes, rocd_filter=rocd_filter, extra_outputs=extra_outputs
+        )
 
     @property
     def phase(self) -> str:
@@ -339,6 +347,26 @@ class RaggedPerformanceTable:
 
     def interpolate(self, state: AircraftState, **extra_coords: float) -> Performance:
         """Interpolate performance at an aircraft state.
+
+        Takes the same arguments as `interpolate_values`.
+
+        Raises:
+            ValueError: If the keyword arguments do not match the axes of the
+                table other than `fl` and `mass`. Also if the state is outside
+                the data.
+        """
+        values = self.interpolate_values(state, **extra_coords)
+        return Performance(
+            true_airspeed=values['tas'],
+            rate_of_climb=values['rocd'],
+            fuel_flow=values['fuel_flow'],
+        )
+
+    def interpolate_values(
+        self, state: AircraftState, **extra_coords: float
+    ) -> dict[str, float]:
+        """Interpolate the `OUTPUTS` and `extra_outputs` columns at an
+        aircraft state. Return the values keyed by column name.
 
         Flight level and mass come from `state`. Give a value for each other
         axis of the table as a keyword argument, for example `mach=0.78`.
@@ -378,5 +406,5 @@ class RaggedPerformanceTable:
         coords = {'fl': fl, 'mass': mass, **extra_coords}
         # Reorder them to be consistent with what the interpolator expects
         ordered_coords = tuple(coords[a] for a in self.axes)
-        tas, rocd, fuel_flow = self._interpolator(*ordered_coords)
-        return Performance(true_airspeed=tas, rate_of_climb=rocd, fuel_flow=fuel_flow)
+        values = self._interpolator(*ordered_coords)
+        return dict(zip(self._interpolator.interp_vars, values, strict=True))

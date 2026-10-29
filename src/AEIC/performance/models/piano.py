@@ -6,7 +6,9 @@ every phase carries thrust, drag and trajectory columns.
 
 The model evaluates performance by linear interpolation over ragged tables:
 climb and descent in mass and flight level, and cruise in flight level, mass
-and Mach number. Queries outside the data raise `ValueError`.
+and Mach number. Queries outside the data raise `ValueError`. Cruise also
+interpolates the rate of climb at maximum climb (MCL) thrust, and raises
+`ValueError` if it is below `PianoConstantMachCruise.min_rocd_mcl_mach`.
 """
 
 # TODO: Remove this when we migrate to Python 3.14+.
@@ -24,14 +26,15 @@ from AEIC.performance.models.base import (
 from AEIC.performance.models.ragged import RaggedPerformanceTable
 from AEIC.performance.types import (
     AircraftState,
-    CruiseMach,
     Performance,
+    PianoConstantMachCruise,
     SimpleFlightRules,
     TableInput,
 )
+from AEIC.units import METERS_TO_FL
 from AEIC.utils.models import CIBaseModel
 
-PianoFlightRules = SimpleFlightRules | CruiseMach
+PianoFlightRules = SimpleFlightRules | PianoConstantMachCruise
 """Flight rules accepted by the PIANO performance model."""
 
 
@@ -45,7 +48,7 @@ class HoldPerformance(CIBaseModel):
 class PianoPerformanceModel(BasePerformanceModel[PianoFlightRules]):
     """Performance model built from PIANO climb, cruise and descent exports.
 
-    Climb and descent use `SimpleFlightRules`. Cruise uses `CruiseMach`,
+    Climb and descent use `SimpleFlightRules`. Cruise uses `PianoConstantMachCruise`,
     because PIANO cruise performance depends on Mach number."""
 
     FLIGHT_RULES_CLASS: ClassVar[type] = PianoFlightRules  # type: ignore[assignment]
@@ -131,7 +134,10 @@ class PianoPerformanceModel(BasePerformanceModel[PianoFlightRules]):
             self.climb_flight_performance, ROCDFilter.POSITIVE, ('mass', 'fl')
         )
         self._cruise_table = RaggedPerformanceTable.from_input(
-            self.cruise_flight_performance, ROCDFilter.ZERO, ('fl', 'mass', 'mach')
+            self.cruise_flight_performance,
+            ROCDFilter.ZERO,
+            ('fl', 'mass', 'mach'),
+            extra_outputs=('rocd_mcl_fix_mach',),
         )
         self._descent_table = RaggedPerformanceTable.from_input(
             self.descent_flight_performance, ROCDFilter.NEGATIVE, ('mass', 'fl')
@@ -189,18 +195,44 @@ class PianoPerformanceModel(BasePerformanceModel[PianoFlightRules]):
         """Interpolate performance in the table for the flight phase.
 
         Raises:
-            ValueError: If the rules are `SimpleFlightRules.CRUISE`, or if the
-                state is outside the data.
+            ValueError: If the rules are `SimpleFlightRules.CRUISE`, if the
+                state is outside the data, or if the cruise climb potential is
+                below `PianoConstantMachCruise.min_rocd_mcl_mach`.
         """
         match rules:
             case SimpleFlightRules.CLIMB:
                 return self._climb_table.interpolate(state)
             case SimpleFlightRules.DESCEND:
                 return self._descent_table.interpolate(state)
-            case CruiseMach(mach=mach):
-                return self._cruise_table.interpolate(state, mach=mach)
+            case PianoConstantMachCruise():
+                return self._evaluate_cruise(state, rules)
             case SimpleFlightRules.CRUISE:
                 raise ValueError(
                     'PIANO cruise performance depends on Mach number. '
-                    'Use CruiseMach flight rules instead of SimpleFlightRules.CRUISE.'
+                    'Use PianoConstantMachCruise flight rules instead of '
+                    'SimpleFlightRules.CRUISE.'
                 )
+
+    def _evaluate_cruise(
+        self, state: AircraftState, rules: PianoConstantMachCruise
+    ) -> Performance:
+        """Interpolate cruise performance and check the climb potential."""
+        values = self._cruise_table.interpolate_values(state, mach=rules.mach)
+
+        # A negative climb potential means that the drag is higher than the
+        # MCL thrust, so the aircraft cannot hold level flight at this Mach.
+        rocd_mcl = values['rocd_mcl_fix_mach']
+        minimum = rules.min_rocd_mcl_mach
+        if minimum is not None and rocd_mcl < minimum:
+            raise ValueError(
+                f'cruise at FL{state.altitude * METERS_TO_FL:.0f}, '
+                f'mass {state.aircraft_mass} kg, Mach {rules.mach}: rate of '
+                f'climb at MCL thrust {rocd_mcl:.3f} m/s is below the minimum '
+                f'{minimum} m/s'
+            )
+
+        return Performance(
+            true_airspeed=values['tas'],
+            rate_of_climb=values['rocd'],
+            fuel_flow=values['fuel_flow'],
+        )
