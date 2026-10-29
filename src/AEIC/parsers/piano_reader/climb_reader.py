@@ -36,6 +36,8 @@ from AEIC.units import (
 from AEIC.utils.standard_atmosphere import crossover_altitude
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from AEIC.parsers.piano_reader.piano_data import PianoOverrides
 
 logger = logging.getLogger(__name__)
@@ -235,17 +237,15 @@ def _extrapolate_to_halt(
 ) -> list[float] | None:
     """Extrapolate a halted climb block to its halt altitude.
 
-    PIANO halts a climb when its rate of climb gets too low, but its table
-    stops at a lower altitude. The halt altitude is one the climb reached, so
-    a row there extends the block without going past the data.
+    PIANO halts a climb when its rate of climb gets too low, but tabulated values
+    can stop at a lower altitude. The halt altitude is one the climb reached, so
+    an extrapolated row there extends the table without going past the valid data.
 
     The fit uses the rows above the crossover, where the climb is at constant
     Mach:
 
     - Rate of climb, net thrust and fuel flow are linear through the last two
-      rows. Fuel flow is the burn over the time of the interval that ends at
-      a row, as the parser stores it. The fit skips the interval that spans
-      the crossover, and intervals that span no time.
+      rows.
     - Drag is quadratic through the last three rows, because it passes
       through a minimum near the ceiling.
     - Time is the integral of dh / ROCD from the last row, distance is the
@@ -257,14 +257,9 @@ def _extrapolate_to_halt(
     than two fuel flows to fit.
     """
     above = [row for row in rows if row[IDX_ALT] > schedule.crossover_ft]
-    fuel_flow = [
-        (
-            row[IDX_ALT],
-            (row[IDX_BURN] - below[IDX_BURN]) / (row[IDX_TIME] - below[IDX_TIME]),
-        )
-        for below, row in zip(rows, rows[1:])
-        if below[IDX_ALT] > schedule.crossover_ft and row[IDX_TIME] != below[IDX_TIME]
-    ]
+    fuel_flow = _fuel_flow_points(rows, schedule.crossover_ft)
+
+    # Check we have enough data points to extrapolate
     if len(above) < 3 or len(fuel_flow) < 2:
         logger.warning(
             '%s: too few rows at constant Mach to extrapolate the climb to '
@@ -288,6 +283,9 @@ def _extrapolate_to_halt(
         'drag': drag_lbf(halt_ft),
         'fuel flow': _polynomial_through(fuel_flow[-2:])(halt_ft),
     }
+
+    # We should not get negative values, even ROC because we should
+    # still be climbing
     for name, value in values.items():
         if value < 0:
             logger.warning(
@@ -300,6 +298,7 @@ def _extrapolate_to_halt(
             )
 
     altitude_ft = np.linspace(last[IDX_ALT], halt_ft, _HALT_GAP_INTEGRATION_POINTS)
+
     with np.errstate(divide='ignore', invalid='ignore'):
         rocd_mps = np.array([rocd_fpm(h) for h in altitude_ft]) * FPM_TO_MPS
         dt_dh = FEET_TO_METERS / rocd_mps
@@ -321,8 +320,32 @@ def _extrapolate_to_halt(
     return row
 
 
-def _polynomial_through(points: list[tuple[float, float]]):
-    """The polynomial of lowest degree through `points`, as a function."""
+def _fuel_flow_points(
+    rows: list[list[float]], crossover_ft: float
+) -> list[tuple[float, float]]:
+    """(Altitude [feet], fuel flow [lb/s]) of each climb row above the
+    crossover, in row order.
+
+    The fuel flow of a row is the burn over the time of the interval that ends
+    at the row, as the parser stores it. The interval that spans the crossover
+    is skipped, because part of it is at constant CAS. Intervals that span no
+    time are skipped, because they have no defined fuel flow.
+    """
+    return [
+        (
+            row[IDX_ALT],
+            (row[IDX_BURN] - below[IDX_BURN]) / (row[IDX_TIME] - below[IDX_TIME]),
+        )
+        for below, row in zip(rows, rows[1:])
+        if below[IDX_ALT] > crossover_ft and row[IDX_TIME] != below[IDX_TIME]
+    ]
+
+
+def _polynomial_through(
+    points: list[tuple[float, float]],
+) -> Callable[[float], float]:
+    """The polynomial of lowest degree through `points`, as a function.
+    Formulated as Lagrange polynomial."""
 
     def evaluate(x: float) -> float:
         total = 0.0
