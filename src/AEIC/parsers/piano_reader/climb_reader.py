@@ -105,7 +105,7 @@ _HALT_GAP_INTEGRATION_POINTS = 101
 
 def _parse_climb(
     path: str, overrides: PianoOverrides, extrapolate_to_halt: bool = True
-) -> tuple[SpeedData, int, int, TableInput, list[tuple[float, float]]]:
+) -> tuple[SpeedData, int, int, TableInput]:
     """Parse a PIANO climb details export.
 
     If `extrapolate_to_halt` is set, a block whose climb halted more than
@@ -113,8 +113,7 @@ def _parse_climb(
     altitude. See `_extrapolate_to_halt`.
 
     Returns the climb speed schedule, the ISA offset, the highest altitude
-    reached by any block, the climb table, and the (flight level, mass [kg])
-    of each extrapolated row.
+    reached by any block and the climb table.
     """
     lines = _read_lines(path)
     nox_col = _nox_column(lines)
@@ -126,7 +125,6 @@ def _parse_climb(
     schedule = _climb_schedule(blocks, overrides)
 
     data = []
-    extrapolated_points = []
     maximum_altitude_ft = 0.0
     for n, (block, mass) in enumerate(zip(blocks, masses, strict=True)):
         label = f'Climb block {n + 1}'
@@ -166,7 +164,6 @@ def _parse_climb(
                         halt_ft - rows[-1][IDX_ALT],
                     )
                     rows = [*rows, row]
-                    extrapolated_points.append((halt_ft / 100, mass))
                     tas, rocd, d_time, d_distance, d_burn = _derived_columns(
                         rows, schedule
                     )
@@ -207,7 +204,6 @@ def _parse_climb(
         isa_offset,
         int(maximum_altitude_ft),
         table,
-        extrapolated_points,
     )
 
 
