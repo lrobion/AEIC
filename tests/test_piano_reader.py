@@ -661,18 +661,17 @@ def test_extrapolate_to_halt_needs_two_usable_fuel_flows(caplog):
     assert any('too few rows' in r.getMessage() for r in caplog.records)
 
 
-def test_extrapolate_to_halt_keeps_and_warns_a_negative_value(caplog):
+def test_extrapolate_to_halt_skips_a_negative_rate_of_climb(caplog):
     """The rate of climb reaches zero at 36000 feet, so it is negative at a
-    halt altitude above that. It is not clamped."""
+    halt altitude above that. The climb is not extrapolated."""
     rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0, 34000.0])
 
     with caplog.at_level(logging.WARNING, logger='AEIC.parsers.piano_reader'):
         row = _extrapolate_to_halt('block', rows, 36500.0, SCHEDULE)
 
-    assert row is not None
-    assert row[IDX_ROCD] == pytest.approx(_rocd_fpm(36500.0))
-    assert row[IDX_ROCD] < 0
+    assert row is None
     assert any(
-        'extrapolated rate of climb' in r.getMessage() and 'negative' in r.getMessage()
+        'extrapolated rocd' in r.getMessage()
+        and 'skipping extrapolation' in r.getMessage()
         for r in caplog.records
     )

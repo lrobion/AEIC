@@ -29,6 +29,7 @@ from AEIC.units import (
     FL_TO_METERS,
     FPM_TO_MPS,
     KNOTS_TO_MPS,
+    METERS_TO_FEET,
     NAUTICAL_MILES_TO_METERS,
     POUNDS_FORCE_TO_NEWTONS,
     POUNDS_TO_KG,
@@ -249,8 +250,9 @@ def _extrapolate_to_halt(
       times that time.
 
     Returns the row in the units and column order of the PIANO table, or
-    None if there are fewer than three rows above the crossover, or fewer
-    than two fuel flows to fit.
+    None if there are fewer than three rows above the crossover, fewer than
+    two fuel flows to fit, or if the rate of climb, net thrust, drag or fuel
+    flow at the halt altitude is not positive.
     """
     above = [row for row in rows if row[IDX_ALT] > schedule.crossover_ft]
     fuel_flow = _fuel_flow_points(rows, schedule.crossover_ft)
@@ -266,6 +268,8 @@ def _extrapolate_to_halt(
         return None
 
     last = rows[-1]
+
+    # Construct interpolants for all variables
     rocd_fpm = _polynomial_through(
         [(row[IDX_ALT], row[IDX_ROCD]) for row in above[-2:]]
     )
@@ -273,45 +277,59 @@ def _extrapolate_to_halt(
     drag_lbf = _polynomial_through(
         [(row[IDX_ALT], row[IDX_DRAG]) for row in above[-3:]]
     )
+    ff_lbfps = _polynomial_through(fuel_flow[-2:])
+
+    # Evaluate extrapolation at the halt altitude
     values = {
-        'rate of climb': rocd_fpm(halt_ft),
+        'rocd': rocd_fpm(halt_ft),
         'net thrust': fn_lbf(halt_ft),
         'drag': drag_lbf(halt_ft),
-        'fuel flow': _polynomial_through(fuel_flow[-2:])(halt_ft),
+        'fuel flow': ff_lbfps(halt_ft),
     }
 
-    # We should not get negative values, even ROC because we should
-    # still be climbing
+    # Sanity check: we should not get negative values here
+    # and we skip interpolation if we do as these values are
+    # non physical
     for name, value in values.items():
-        if value < 0:
+        if value <= 0:
             logger.warning(
                 '%s: extrapolated %s at the halt altitude of %.0f feet is '
-                'negative (%g)',
+                'negative (%g), skipping extrapolation',
                 label,
                 name,
                 halt_ft,
                 value,
             )
+            return None
 
+    # Time and distance are cumulative metrics so we need to integrate
+    # dt/dh = 1 / ROCD and ground_speed * dt/dh, over some discretization of dh
     altitude_ft = np.linspace(last[IDX_ALT], halt_ft, _HALT_GAP_INTEGRATION_POINTS)
 
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rocd_mps = np.array([rocd_fpm(h) for h in altitude_ft]) * FPM_TO_MPS
-        dt_dh = FEET_TO_METERS / rocd_mps
-        tas = np.array(
-            [_tas_from_schedule(h * FEET_TO_METERS, schedule) for h in altitude_ft]
-        )
-        ground_speed = np.sqrt(tas**2 - rocd_mps**2)
-        d_time = float(np.trapezoid(dt_dh, altitude_ft))
-        d_distance_m = float(np.trapezoid(ground_speed * dt_dh, altitude_ft))
+    rocd_mps = np.array([rocd_fpm(h) for h in altitude_ft]) * FPM_TO_MPS
+    # We need dt/dh in s/ft to integrate with dh in ft
+    dt_dh = 1 / (rocd_mps * METERS_TO_FEET)
+    # TAS in m/s
+    tas = np.array(
+        [_tas_from_schedule(h * FEET_TO_METERS, schedule) for h in altitude_ft]
+    )
+    # Ground speed in m/s
+    ground_speed = np.sqrt(tas**2 - rocd_mps**2)
 
+    # Integrate time and ground_speed
+    d_time = float(np.trapezoid(dt_dh, altitude_ft))
+    d_distance_m = float(np.trapezoid(ground_speed * dt_dh, altitude_ft))
+
+    # Everything needs to be in PIANO raw data units
+    # ft, s, nm, lb, lbf, fp/min, lbf
     row = [0.0] * _CLIMB_ROW_COLS
     row[IDX_ALT] = halt_ft
     row[IDX_TIME] = last[IDX_TIME] + d_time
     row[IDX_DIST] = last[IDX_DIST] + d_distance_m / NAUTICAL_MILES_TO_METERS
+    # Additional fuel burn is estimated as cumulative time * fuel flow
     row[IDX_BURN] = last[IDX_BURN] + values['fuel flow'] * d_time
     row[IDX_FN] = values['net thrust']
-    row[IDX_ROCD] = values['rate of climb']
+    row[IDX_ROCD] = values['rocd']
     row[IDX_DRAG] = values['drag']
     return row
 
