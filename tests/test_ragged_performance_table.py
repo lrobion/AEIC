@@ -138,6 +138,44 @@ def test_min_and_max_mass_resolve_to_table_masses(mass, expected):
     assert_performance(climb_table().interpolate(state(fl, mass)), *expected)
 
 
+def test_max_mass_above_the_heavy_ceiling_resolves_to_the_light_mass():
+    # The 80000 kg curve stops at FL150, so at FL180 only 60000 kg is valid.
+    # On that curve, FL180 is 0.8 of the way from FL100 to FL200.
+    assert_performance(climb_table().interpolate(state(180.0, 'max')), 190.0, 11.0, 1.1)
+
+
+def test_max_mass_resolves_at_the_query_fl_and_mach():
+    # At FL350, the 80000 kg Mach sweep starts at 0.75, so at Mach 0.72 the
+    # FL325 query can only use 60000 kg. On that mass, Mach 0.72 is 0.2 of
+    # the way from 0.70 to 0.80. FL325 is halfway between FL300 and FL350.
+    perf = cruise_table().interpolate(state(325.0, 'max'), mach=0.72)
+
+    assert_performance(perf, 0.5 * 216.0 + 0.5 * 211.0, 0.0, 0.5 * 1.08 + 0.5 * 0.98)
+
+
+@pytest.mark.parametrize(
+    ('table', 'fl', 'extra_coords', 'message'),
+    [
+        pytest.param(
+            climb_table, 250.0, {}, 'climb table: no valid mass for fl=250.0', id='fl'
+        ),
+        pytest.param(
+            cruise_table,
+            325.0,
+            {'mach': 0.9},
+            'cruise table: no valid mass for fl=325.0, mach=0.9',
+            id='mach',
+        ),
+    ],
+)
+@pytest.mark.parametrize('mass', ['min', 'max'])
+def test_min_or_max_mass_with_no_valid_mass_raises(
+    table, fl, extra_coords, message, mass
+):
+    with raises_message(message):
+        table().interpolate(state(fl, mass), **extra_coords)
+
+
 def test_cruise_without_mach_raises():
     with raises_message("cruise performance needs coordinates ['mach'], got []"):
         cruise_table().interpolate(state(300.0, 60000.0))

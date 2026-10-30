@@ -10,10 +10,11 @@ Queries outside the data raise `ValueError`."""
 # TODO: Remove this when we migrate to Python 3.14+.
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from itertools import groupby
-from typing import ClassVar, Self
+from typing import ClassVar, NamedTuple, Self
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,89 @@ class _LeafNode(_NodeBase):
 
 _Node = _InnerNode | _LeafNode
 """Node of the interpolation tree for one axis."""
+
+
+class Interval(NamedTuple):
+    """Closed interval of axis values. A single point has `low == high`."""
+
+    low: float
+    high: float
+
+
+_ALL_VALUES = [Interval(-math.inf, math.inf)]
+"""Valid range of a node below the free axis that accepts the fixed
+coordinates."""
+
+
+def _bracket(
+    axis_values: list[float], coord: float, snap_to_node: bool = False
+) -> tuple[int, int, float]:
+    """Find the two axis values around `coord`, and how far `coord` is from
+    the lower one, as a fraction of the interval.
+
+    Returns `(idx_low, idx_high, interp_weight)`, with `interp_weight` in
+    [0, 1]. The caller must check that `coord` is in range.
+
+    If `snap_to_node` is set and `coord` is exactly on the upper axis value,
+    return that index as `idx_low` with a weight of 0. Then, on any exact
+    axis value, `idx_low` is that value and the weight is 0, so the caller
+    only has to check for a weight of 0."""
+
+    # With one axis value, the range check accepts only that exact value.
+    n_values = len(axis_values)
+    if n_values == 1:
+        # idx_high is never used in this case but to be
+        # explicit set it to 0 anyway
+        return 0, 0, 0.0
+
+    # Bisect right returns the idx of the first value in
+    # axis_values (sorted) > coord
+    # Then the lower point for interpolation is idx - 1
+    idx_low = bisect_right(axis_values, coord) - 1
+    # Clamp idx_low so that idx_low + 1 is always valid
+    idx_low = min(idx_low, n_values - 2)
+    idx_high = idx_low + 1
+
+    axis_value_low = axis_values[idx_low]
+    axis_value_high = axis_values[idx_high]
+
+    interp_weight = (coord - axis_value_low) / (axis_value_high - axis_value_low)
+
+    # If interp_weight == 1, it means coord is exactly
+    # axis_values[idx_high]. Setting idx_low = idx_high
+    # and interp_weight = 0.0 allows the caller to treat the
+    # cases:
+    #      coord == axis_values[idx_high]
+    #      coord == axis_values[idx_low]
+    # the same way afterwards
+    if snap_to_node and interp_weight == 1.0:
+        return idx_high, idx_high, 0.0
+
+    return idx_low, idx_high, interp_weight
+
+
+def _intersect(a: list[Interval], b: list[Interval]) -> list[Interval]:
+    """Intersection of two sorted lists of disjoint intervals."""
+    result = []
+    i = 0
+    j = 0
+
+    while i < len(a) and j < len(b):
+        low = max(a[i].low, b[j].low)
+        high = min(a[i].high, b[j].high)
+
+        # a[i] and b[i] intersect
+        if low <= high:
+            result.append(Interval(low, high))
+
+        # Move past the interval that ends first: it cannot overlap
+        # anything further in the other list.
+        if a[i].high < b[j].high:
+            i += 1
+        else:
+            j += 1
+
+    return result
 
 
 class RaggedInterpolator:
@@ -153,40 +237,9 @@ class RaggedInterpolator:
         if not axis_values[0] <= coord <= axis_values[-1]:
             raise ValueError(self._range_message(depth, coord, node))
 
-        # Find the two axis values around `coord`, and how far `coord` is from
-        # the lower one, as a fraction of the interval. With one axis value,
-        # the range check accepts only that exact value.
-        n_values = len(axis_values)
-        if n_values == 1:
-            # idx_high is never used in this branch but to be
-            # explicit set it to 0 anyway
-            idx_low, idx_high = 0, 0
-            interp_weight = 0.0
-        else:
-            # Bisect right returns the idx of the first value in
-            # axis_values (sorted) > coord
-            # Then the lower point for interpolation is idx - 1
-            idx_low = bisect_right(axis_values, coord) - 1
-            # Clamp idx_low so that idx_low + 1 is always valid
-            idx_low = min(idx_low, n_values - 2)
-            idx_high = idx_low + 1
-
-            axis_value_low = axis_values[idx_low]
-            axis_value_high = axis_values[idx_high]
-
-            interp_weight = (coord - axis_value_low) / (
-                axis_value_high - axis_value_low
-            )
-
-            # If interp_weight == 1, it means coord is exactly
-            # axis_values[idx_high]. Setting idx_low = idx_high
-            # and interp_weight = 0.0 allows us to treat the
-            # cases:
-            #      coord == axis_values[idx_high]
-            #      coord == axis_values[idx_low]
-            # the same way afterwards
-            if interp_weight == 1.0:
-                idx_low, interp_weight = idx_high, 0.0
+        idx_low, idx_high, interp_weight = _bracket(
+            axis_values, coord, snap_to_node=True
+        )
 
         if isinstance(node, _LeafNode):
             # data_low and data_high are tuples with one value for each
@@ -229,6 +282,131 @@ class RaggedInterpolator:
                 for d_low, d_high in zip(data_low, data_high)
             ]
         )
+
+    def valid_range(self, axis: str, **coords: float) -> list[Interval]:
+        """Values of one axis at which a query is inside the data, with the
+        other axes fixed.
+
+        Give a value for each other axis as a keyword argument, for example
+        `valid_range('mass', fl=350, mach=0.78)`. Every value in the result is
+        a valid mass coordinate for `__call__`. Values outside it raise
+        `ValueError`.
+
+        Returns:
+            Sorted, disjoint, closed intervals. The list is empty if no value
+            is valid. It can have gaps, for example if a middle mass does not
+            cover the requested Mach number.
+
+        Raises:
+            ValueError: If `axis` is not an axis of the table.
+            TypeError: If the keyword arguments do not match the other axes.
+        """
+        # Validate input axis and coordinates
+        if axis not in self.axes:
+            raise ValueError(f'{self.name} table: no axis "{axis}" in {self.axes}')
+        expected = set(self.axes) - {axis}
+        if set(coords) != expected:
+            raise TypeError(
+                f'{self.name} table: expected coordinates {sorted(expected)}, '
+                f'got {sorted(coords)}'
+            )
+
+        # No valid range for an empty interpolation table
+        if not self._root.axis_values:
+            return []
+
+        # The free axis has a NaN placeholder that is never read
+        # Sort the coords in the order expected by the interpolator
+        full_coords = tuple(
+            math.nan if a == axis else float(coords[a]) for a in self.axes
+        )
+        depth_free_axis = self.axes.index(axis)
+        return self._valid(self._root, full_coords, 0, depth_free_axis)
+
+    def _valid(
+        self, node: _Node, coords: tuple[float, ...], depth: int, free_depth: int
+    ) -> list[Interval]:
+        """Valid range of the free axis in the subtree of `node`.
+
+        Below the free axis, the result is `_ALL_VALUES` if the node accepts
+        the fixed coordinates, or empty if it does not."""
+        axis_values = node.axis_values
+
+        if depth == free_depth:
+            # If the free axis is the last axis (has leaf nodes),
+            # any value in the node's axis range is valid.
+            if isinstance(node, _LeafNode):
+                return [Interval(axis_values[0], axis_values[-1])]
+
+            # The free axis is not a leaf node, so we need to check
+            # the validity range of all the children of this node
+            # Each child either accepts the fixed coordinates below it or
+            # not. Interpolation between two neighbouring axis values needs
+            # both children, so a valid child with no valid neighbour gives a
+            # single point.
+            accepts = [
+                bool(self._valid(child, coords, depth + 1, free_depth))
+                for child in node.children
+            ]
+            result: list[Interval] = []
+            for i, value in enumerate(axis_values):
+                if not accepts[i]:
+                    continue
+
+                # If there is a next value, is that one in range?
+                if i < len(axis_values) - 1:
+                    next_accepts = accepts[i + 1]
+                else:
+                    next_accepts = False
+
+                # If it is in range than update the high of valid interval
+                if next_accepts:
+                    high = axis_values[i + 1]
+                else:
+                    high = value
+
+                # Join to the previous interval if it ends at this value
+                # as the intervals are not disjoint
+                if len(result) > 0 and result[-1].high == value:
+                    result[-1] = Interval(result[-1].low, high)
+                # Intervals are disjoint, create a new interval
+                else:
+                    result.append(Interval(value, high))
+
+            return result
+
+        # Fixed axis: same range check and bracketing as _evaluate.
+        # If the fixed coord is outside of the range of the node
+        # then there is not valid interval
+        coord = coords[depth]
+        if not axis_values[0] <= coord <= axis_values[-1]:
+            return []
+
+        # The free axis is above (depthwise) this node, and the fixed coord is
+        # accepted by this leaf node so all values are valid
+        if isinstance(node, _LeafNode):
+            return _ALL_VALUES
+
+        idx_low, idx_high, interp_weight = _bracket(
+            axis_values, coord, snap_to_node=True
+        )
+
+        # When interpolating we need the point below the query coord (low)
+        # and the point above the query coord (high), so both need to have
+        # a valid range in the free axis
+        valid_low = self._valid(node.children[idx_low], coords, depth + 1, free_depth)
+
+        # Same as in _evaluate, an exact axis value uses one child only.
+        if interp_weight == 0.0 or not valid_low:
+            return valid_low
+
+        # Interpolation needs both children, so a value of the free axis must
+        # be valid in both.
+        valid_high = self._valid(node.children[idx_high], coords, depth + 1, free_depth)
+
+        # We have the low child's validity range and the high child's validity range,
+        # the final validity range is their intersection
+        return _intersect(valid_low, valid_high)
 
     def _range_message(self, depth: int, coord: float, node: _Node) -> str:
         message = (
@@ -371,10 +549,13 @@ class RaggedPerformanceTable:
         Flight level and mass come from `state`. Give a value for each other
         axis of the table as a keyword argument, for example `mach=0.78`.
 
+        A mass of 'min' or 'max' is the lightest or heaviest mass that is
+        valid at the flight level and the other coordinates.
+
         Raises:
             ValueError: If the keyword arguments do not match the axes of the
                 table other than `fl` and `mass`. Also if the state is outside
-                the data.
+                the data, or if no mass is valid for a 'min' or 'max' mass.
         """
 
         # Validate coords
@@ -384,12 +565,6 @@ class RaggedPerformanceTable:
                 f'{self.phase} performance needs coordinates {sorted(expected)}, '
                 f'got {sorted(extra_coords)}'
             )
-
-        mass = state.aircraft_mass
-        if mass == 'min':
-            mass = self.df.mass.min()
-        elif mass == 'max':
-            mass = self.df.mass.max()
 
         # Round FL to 1e-9 because the metric altitude for an FL
         # does not convert exactly back to the FL which can cause
@@ -401,6 +576,24 @@ class RaggedPerformanceTable:
         # have at most 2-3 decimals, if they had 10 this rounding would fail
         # to snap the points correctly to the interpolation grid
         fl = round(state.altitude * METERS_TO_FL, 9)
+
+        # In a ragged table, the lightest or heaviest mass of the whole table
+        # can be outside the data at this FL and Mach. So resolve 'min' and
+        # 'max' to the extremes of the masses that are valid here.
+        mass = state.aircraft_mass
+        if mass == 'min' or mass == 'max':
+            valid = self._interpolator.valid_range('mass', fl=fl, **extra_coords)
+
+            # No valid mass range
+            if len(valid) == 0:
+                where = ', '.join(
+                    f'{axis}={value}'
+                    for axis, value in {'fl': fl, **extra_coords}.items()
+                )
+                raise ValueError(f'{self.phase} table: no valid mass for {where}')
+
+            # At least one valid mass interval
+            mass = valid[0].low if mass == 'min' else valid[-1].high
 
         # Unpack all interpolation coordinates passed by the caller
         coords = {'fl': fl, 'mass': mass, **extra_coords}

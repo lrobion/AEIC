@@ -258,7 +258,14 @@ def test_simple_cruise_rules_are_refused_with_a_pointer_to_cruise_mach(build):
 def test_altitude_above_the_climb_table_is_refused(build):
     model = build()
     top_fl = max(model.climb_flight_performance.column('fl'))
-    state = AircraftState(altitude=(top_fl + 10) / METERS_TO_FL, aircraft_mass='min')
+    # Using aircraft_mass='min' would trigger an earlier check
+    # that would fail because top_fl+10 is outside of the valid
+    # range for that minimum mass, so we bypass it for the purpose
+    # of this test
+    state = AircraftState(
+        altitude=(top_fl + 10) / METERS_TO_FL,
+        aircraft_mass=min(model.climb_flight_performance.column('mass')),
+    )
 
     with pytest.raises(ValueError, match='climb table: fl='):
         model.evaluate(state, SimpleFlightRules.CLIMB)

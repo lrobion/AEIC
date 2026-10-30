@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from scipy.interpolate import RegularGridInterpolator
 
-from AEIC.performance.models.ragged import RaggedInterpolator
+from AEIC.performance.models.ragged import Interval, RaggedInterpolator
 
 
 def table(cols: tuple[str, ...], rows: list[tuple[float, ...]]) -> pd.DataFrame:
@@ -256,3 +256,175 @@ def test_empty_table_raises_on_evaluation():
     interp = RaggedInterpolator(df, ('fl',), ('tas',), 'test')
     with raises_message('test table: no data'):
         interp(5.0)
+
+
+# ---------------------------------------------------------------------------
+# Valid range of one axis
+# ---------------------------------------------------------------------------
+
+# The middle masses do not cover Mach 0.72, so the valid masses at that Mach
+# have a gap.
+TABLE_WITH_GAP = table(
+    ('mass', 'mach', 'fuel_flow'),
+    [
+        (1.0, 0.70, 1.0),
+        (1.0, 0.80, 2.0),
+        (2.0, 0.75, 3.0),
+        (2.0, 0.80, 4.0),
+        (3.0, 0.70, 5.0),
+        (3.0, 0.80, 6.0),
+        (4.0, 0.70, 7.0),
+        (4.0, 0.80, 8.0),
+        (5.0, 0.70, 9.0),
+        (5.0, 0.80, 10.0),
+    ],
+)
+
+
+def ragged_2d() -> RaggedInterpolator:
+    return RaggedInterpolator(RAGGED_2D, ('mass', 'fl'), ('tas',), 'test')
+
+
+def ragged_3d() -> RaggedInterpolator:
+    return RaggedInterpolator(RAGGED_3D, ('fl', 'mass', 'mach'), ('fuel_flow',), 'test')
+
+
+def table_with_gap() -> RaggedInterpolator:
+    return RaggedInterpolator(TABLE_WITH_GAP, ('mass', 'mach'), ('fuel_flow',), 'test')
+
+
+@pytest.mark.parametrize(
+    ('mass', 'expected'),
+    [
+        pytest.param(1.0, [Interval(5.0, 20.0)], id='light_node'),
+        pytest.param(3.0, [Interval(0.0, 15.0)], id='heavy_node'),
+        # Between the masses, the FL must be in the range of both.
+        pytest.param(2.0, [Interval(5.0, 15.0)], id='between_nodes'),
+        pytest.param(0.5, [], id='outside'),
+    ],
+)
+def test_valid_range_of_the_inner_axis(mass, expected):
+    assert ragged_2d().valid_range('fl', mass=mass) == expected
+
+
+@pytest.mark.parametrize(
+    ('fl', 'expected'),
+    [
+        pytest.param(10.0, [Interval(1.0, 3.0)], id='both_masses'),
+        # Above the heavy ceiling and below the light floor, only the exact
+        # mass of the node that covers the FL is valid.
+        pytest.param(18.0, [Interval(1.0, 1.0)], id='above_heavy_ceiling'),
+        pytest.param(2.0, [Interval(3.0, 3.0)], id='below_light_floor'),
+        pytest.param(25.0, [], id='above_all'),
+    ],
+)
+def test_valid_range_of_the_outer_axis(fl, expected):
+    assert ragged_2d().valid_range('mass', fl=fl) == expected
+
+
+@pytest.mark.parametrize(
+    ('fl', 'mach', 'expected'),
+    [
+        pytest.param(300.0, 0.72, [Interval(50.0, 70.0)], id='full_fl_node'),
+        pytest.param(400.0, 0.72, [Interval(50.0, 50.0)], id='ragged_fl_node'),
+        # Between the FL nodes, the mass must be valid in both.
+        pytest.param(350.0, 0.72, [Interval(50.0, 50.0)], id='between_fl_nodes'),
+        pytest.param(350.0, 0.78, [Interval(50.0, 70.0)], id='mach_in_all_cells'),
+        pytest.param(350.0, 0.90, [], id='mach_outside'),
+    ],
+)
+def test_valid_range_of_a_middle_axis(fl, mach, expected):
+    assert ragged_3d().valid_range('mass', fl=fl, mach=mach) == expected
+
+
+def test_valid_range_of_the_innermost_axis_of_three():
+    # At FL 400, mass 70 starts at Mach 0.75, so it raises the lower bound.
+    assert ragged_3d().valid_range('mach', fl=350.0, mass=60.0) == [
+        Interval(0.75, 0.80)
+    ]
+
+
+def test_valid_range_of_the_outermost_axis_of_three():
+    assert ragged_3d().valid_range('fl', mass=70.0, mach=0.72) == [
+        Interval(300.0, 300.0)
+    ]
+
+
+def test_valid_range_has_a_gap_where_a_middle_node_does_not_cover():
+    assert table_with_gap().valid_range('mass', mach=0.72) == [
+        Interval(1.0, 1.0),
+        Interval(3.0, 5.0),
+    ]
+
+
+def test_valid_range_of_a_one_axis_table():
+    df = table(('fl', 'tas'), [(0.0, 1.0), (10.0, 2.0)])
+    interp = RaggedInterpolator(df, ('fl',), ('tas',), 'test')
+
+    assert interp.valid_range('fl') == [Interval(0.0, 10.0)]
+
+
+def test_valid_range_of_an_empty_table_is_empty():
+    df = table(('fl', 'tas'), [])
+    interp = RaggedInterpolator(df, ('fl',), ('tas',), 'test')
+
+    assert interp.valid_range('fl') == []
+
+
+def test_valid_range_of_an_unknown_axis_raises():
+    with raises_message("test table: no axis \"mach\" in ('mass', 'fl')"):
+        ragged_2d().valid_range('mach', fl=10.0)
+
+
+@pytest.mark.parametrize(
+    'coords',
+    [
+        pytest.param({}, id='missing'),
+        pytest.param({'fl': 10.0, 'mass': 1.0}, id='free_axis_given'),
+        pytest.param({'fl': 10.0, 'mach': 0.8}, id='unknown'),
+    ],
+)
+def test_valid_range_with_wrong_coordinates_raises(coords):
+    with pytest.raises(TypeError, match='expected coordinates'):
+        ragged_2d().valid_range('mass', **coords)
+
+
+@pytest.mark.parametrize(
+    ('df', 'axes'),
+    [
+        pytest.param(RAGGED_2D, ('mass', 'fl'), id='2d'),
+        pytest.param(RAGGED_3D, ('fl', 'mass', 'mach'), id='3d'),
+        pytest.param(TABLE_WITH_GAP, ('mass', 'mach'), id='gapped'),
+    ],
+)
+def test_valid_range_matches_evaluation(df, axes):
+    """Check that evaluate and valid_range are consistent:
+    * successful interpolation <-> valid
+    * failed interpolation <-> invalid).
+    """
+    interp = RaggedInterpolator(df, axes, (df.columns[-1],), 'test')
+    rng = np.random.default_rng(0)
+
+    def samples(axis: str, n: int) -> list[float]:
+        # Random values a little outside the axis range, and the grid values.
+        values = df[axis]
+        span = values.max() - values.min()
+        low, high = values.min() - 0.1 * span, values.max() + 0.1 * span
+        return [*rng.uniform(low, high, n), *values.unique()]
+
+    for axis in interp.axes:
+        others = [a for a in interp.axes if a != axis]
+        fixed_samples = {a: samples(a, 10) for a in others}
+        for _ in range(200):
+            fixed = {a: float(rng.choice(fixed_samples[a])) for a in others}
+            valid = interp.valid_range(axis, **fixed)
+            ends = [end for interval in valid for end in interval]
+            for value in [*samples(axis, 10), *ends]:
+                coords = {**fixed, axis: value}
+                in_range = any(low <= value <= high for low, high in valid)
+                try:
+                    interp(*(coords[a] for a in interp.axes))
+                    evaluated = True
+                except ValueError:
+                    evaluated = False
+                assert evaluated == in_range, coords
