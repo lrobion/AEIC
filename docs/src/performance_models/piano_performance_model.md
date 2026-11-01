@@ -65,7 +65,7 @@ by `(mass, fl, mach)` for cruise.
 | `mass` | kg | Aircraft mass, the block's initial mass. |
 | `tas` | m/s | True airspeed, derived from the airspeed schedule. |
 | `rocd` | m/s | Rate of climb. |
-| `fuel_flow` | kg/s | Fuel flow, derived from the burn and time deltas. |
+| `fuel_flow` | kg/s | Fuel flow at the row, central difference of burn over time. |
 | `time` | s | Cumulative from the start of the phase. |
 | `distance` | m | Cumulative from the start of the phase. |
 | `burn` | kg | Cumulative from the start of the phase. |
@@ -109,7 +109,7 @@ In this case, the operating point value is kept over the Mach sweep.
 | `mass` | kg | Aircraft mass. |
 | `tas` | m/s | True airspeed, derived from the airspeed schedule. |
 | `rocd` | m/s | Rate of descent, negative. |
-| `fuel_flow` | kg/s | Fuel flow, derived from the burn and time deltas. |
+| `fuel_flow` | kg/s | Fuel flow at the row, central difference of burn over time. |
 | `time` | s | Cumulative from the start of the phase. |
 | `distance` | m | Cumulative from the start of the phase. |
 | `burn` | kg | Cumulative from the start of the phase. |

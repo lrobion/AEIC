@@ -14,6 +14,7 @@ from AEIC.parsers.piano_reader.common import (
     _parse_schedule,
     _read_lines,
     _reject_malformed,
+    _row_fuel_flows,
     _Schedule,
     _split_blocks,
     _tas_from_schedule,
@@ -122,7 +123,10 @@ def _parse_descent(path: str) -> tuple[SpeedData, TableInput, TableInput]:
 
         d_time = _deltas([row[IDX_TIME] for row in rows])
         d_distance = _deltas([row[IDX_DIST] * NAUTICAL_MILES_TO_METERS for row in rows])
-        d_burn = _deltas([row[IDX_BURN] * POUNDS_TO_KG for row in rows])
+        fuel_flow = _row_fuel_flows(
+            [row[IDX_TIME] for row in rows],
+            [row[IDX_BURN] * POUNDS_TO_KG for row in rows],
+        )
 
         _cross_check_tas(label, tas, d_distance, d_time, rocd)
         _cross_check_fuel_burn(
@@ -130,10 +134,10 @@ def _parse_descent(path: str) -> tuple[SpeedData, TableInput, TableInput]:
         )
 
         for i, row in enumerate(rows):
-            if d_time[i] == 0:
+            if fuel_flow[i] is None:
                 logger.warning(
-                    '%s: dropping the row at %.0f feet, which spans no time '
-                    'so has no defined fuel flow',
+                    '%s: dropping the row at %.0f feet, whose fuel flow '
+                    'difference spans no time so is not defined',
                     label,
                     row[IDX_ALT],
                 )
@@ -144,7 +148,7 @@ def _parse_descent(path: str) -> tuple[SpeedData, TableInput, TableInput]:
                     mass,
                     tas[i],
                     rocd[i],
-                    d_burn[i] / d_time[i],
+                    fuel_flow[i],
                     row[IDX_TIME],
                     row[IDX_DIST] * NAUTICAL_MILES_TO_METERS,
                     row[IDX_BURN] * POUNDS_TO_KG,

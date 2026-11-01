@@ -189,23 +189,21 @@ True airspeed at a given altitude then follows three regimes:
 ## Fuel flow and cumulative columns
 
 PIANO does not tabulate fuel flow for climb and descent. The reader derives it
-from the cumulative burn and time columns of consecutive rows:
+from the cumulative burn and time columns.
+
+The trajectory builder needs the fuel flow at the flight level and mass of each
+row. Interior rows take the central difference of cumulative fuel burn:
 
 ```{math}
-\dot{m}_i = \frac{B_i - B_{i-1}}{t_i - t_{i-1}}
+\dot{m}_i = \frac{B_{i+1} - B_{i-1}}{t_{i+1} - t_{i-1}}
 ```
 
-This is a **backward** difference: row {math}`i` is the average fuel flow
-over the step that ends at row {math}`i`, and not the instantaneous value at
-that row's altitude.
+The first and the last rows of a block take the one-sided difference of their
+only step. These two values are the average over that step.
 
-The first row of a block is the exception. It takes
-a **forward** difference instead and is assigned the same step as the second
-row.
-
-```{admonition} Question
-Double check if this is the correct thing to do
-```
+The `time` and `burn` columns stay as PIANO writes them. The `burn` column is
+the exact cumulative burn at the row, so `mass - burn` is the mass of the
+aircraft at the row.
 
 ## Dropped rows and parse failures
 
@@ -219,7 +217,7 @@ the line is a data row in case of field overflows that merge columns.
 |------|------|-----------|
 | Line is a data row but holds fewer than fifteen columns | cruise | Dropped. One aggregate warning gives the count and the first offending line. |
 | Line is a data row but at least one of the first fifteen numeric columns is not a number | cruise | Dropped. One aggregate warning gives the count and the first offending line. |
-| Row spans no time, so {math}`\Delta t = 0` | climb, descent | Dropped, with one warning per row. Fuel flow is undefined over a zero-length step. |
+| The difference of a row spans no time: {math}`t_{i+1} = t_{i-1}`, or a zero-length step at the first or last row | climb, descent | Dropped, with one warning per row. Fuel flow is undefined. Real PIANO exports have no zero-length steps. |
 | Block holds no data rows at all | climb, descent | Skipped, with one warning. |
 | Block states no `Idle thrust below` altitude | descent | No idle thrust row is emitted for that mass. |
 | Duplicate row at the same (flight level, mass, Mach) | cruise | (Off by default) The labelled row overrides the swept row and the warning lists the columns that disagree. |

@@ -19,6 +19,7 @@ from AEIC.parsers.piano_reader.common import (
     _parse_schedule,
     _read_lines,
     _reject_malformed,
+    _row_fuel_flows,
     _Schedule,
     _split_blocks,
     _tas_from_schedule,
@@ -137,7 +138,7 @@ def _parse_climb(
             continue
 
         # Cross-check the rows PIANO wrote, before any extrapolated row.
-        tas, rocd, d_time, d_distance, d_burn = _derived_columns(rows, schedule)
+        tas, rocd, d_time, d_distance, fuel_flow = _derived_columns(rows, schedule)
         _cross_check_tas(label, tas, d_distance, d_time, rocd)
         _cross_check_fuel_burn(
             label, rows[-1][IDX_BURN] * POUNDS_TO_KG, block.header_lines
@@ -165,7 +166,7 @@ def _parse_climb(
                         halt_ft - rows[-1][IDX_ALT],
                     )
                     rows = [*rows, row]
-                    tas, rocd, d_time, d_distance, d_burn = _derived_columns(
+                    tas, rocd, d_time, d_distance, fuel_flow = _derived_columns(
                         rows, schedule
                     )
 
@@ -174,10 +175,10 @@ def _parse_climb(
         )
 
         for i, row in enumerate(rows):
-            if d_time[i] == 0:
+            if fuel_flow[i] is None:
                 logger.warning(
-                    '%s: dropping the row at %.0f feet, which spans no time '
-                    'so has no defined fuel flow',
+                    '%s: dropping the row at %.0f feet, whose fuel flow '
+                    'difference spans no time so is not defined',
                     label,
                     row[IDX_ALT],
                 )
@@ -188,7 +189,7 @@ def _parse_climb(
                     mass,
                     tas[i],
                     rocd[i],
-                    d_burn[i] / d_time[i],
+                    fuel_flow[i],
                     row[IDX_TIME],
                     row[IDX_DIST] * NAUTICAL_MILES_TO_METERS,
                     row[IDX_BURN] * POUNDS_TO_KG,
@@ -210,15 +211,20 @@ def _parse_climb(
 
 def _derived_columns(
     rows: list[list[float]], schedule: _Schedule
-) -> tuple[list[float], list[float], list[float], list[float], list[float]]:
-    """TAS [m/s], rate of climb [m/s], and the per-row time [s], distance [m]
-    and burn [kg] steps of a climb block."""
+) -> tuple[list[float], list[float], list[float], list[float], list[float | None]]:
+    """TAS [m/s], rate of climb [m/s], the per-row time [s] and distance [m]
+    steps, and the fuel flow [kg/s] of a climb block.
+
+    The fuel flow of a row is None if it is not defined, see
+    `_row_fuel_flows`."""
     tas = [_tas_from_schedule(row[IDX_ALT] * FEET_TO_METERS, schedule) for row in rows]
     rocd = [row[IDX_ROCD] * FPM_TO_MPS for row in rows]
     d_time = _deltas([row[IDX_TIME] for row in rows])
     d_distance = _deltas([row[IDX_DIST] * NAUTICAL_MILES_TO_METERS for row in rows])
-    d_burn = _deltas([row[IDX_BURN] * POUNDS_TO_KG for row in rows])
-    return tas, rocd, d_time, d_distance, d_burn
+    fuel_flow = _row_fuel_flows(
+        [row[IDX_TIME] for row in rows], [row[IDX_BURN] * POUNDS_TO_KG for row in rows]
+    )
+    return tas, rocd, d_time, d_distance, fuel_flow
 
 
 def _halt_altitude_ft(block: _Block) -> float | None:
@@ -241,13 +247,14 @@ def _extrapolate_to_halt(
     The fit uses the rows above the crossover, where the climb is at constant
     Mach:
 
-    - Rate of climb, net thrust and fuel flow are linear through the last two
-      rows.
+    - Rate of climb and net thrust are linear through the last two rows.
+    - Fuel flow is linear through the average fuel flows of the last two
+      intervals, each at the midpoint altitude of its interval.
     - Drag is quadratic through the last three rows, because it passes
       through a minimum near the ceiling.
     - Time is the integral of dh / ROCD from the last row, distance is the
-      integral of the ground speed over that time, and burn is the fuel flow
-      times that time.
+      integral of the ground speed over that time, and burn is the integral
+      of the fuel flow over that time.
 
     Returns the row in the units and column order of the PIANO table, or
     None if there are fewer than three rows above the crossover, fewer than
@@ -255,7 +262,7 @@ def _extrapolate_to_halt(
     flow at the halt altitude is not positive.
     """
     above = [row for row in rows if row[IDX_ALT] > schedule.crossover_ft]
-    fuel_flow = _fuel_flow_points(rows, schedule.crossover_ft)
+    fuel_flow = _interval_fuel_flows(rows, schedule.crossover_ft)
 
     # Check we have enough data points to extrapolate
     if len(above) < 3 or len(fuel_flow) < 2:
@@ -316,9 +323,13 @@ def _extrapolate_to_halt(
     # Ground speed in m/s
     ground_speed = np.sqrt(tas**2 - rocd_mps**2)
 
-    # Integrate time and ground_speed
+    # Fuel flow in lb/s
+    fuel_flow = np.array([ff_lbfps(h) for h in altitude_ft])
+
+    # Integrate time, ground_speed and fuel flow
     d_time = float(np.trapezoid(dt_dh, altitude_ft))
     d_distance_m = float(np.trapezoid(ground_speed * dt_dh, altitude_ft))
+    d_burn = float(np.trapezoid(fuel_flow * dt_dh, altitude_ft))
 
     # Everything needs to be in PIANO raw data units
     # ft, s, nm, lb, lbf, fp/min, lbf
@@ -326,28 +337,26 @@ def _extrapolate_to_halt(
     row[IDX_ALT] = halt_ft
     row[IDX_TIME] = last[IDX_TIME] + d_time
     row[IDX_DIST] = last[IDX_DIST] + d_distance_m / NAUTICAL_MILES_TO_METERS
-    # Additional fuel burn is estimated as cumulative time * fuel flow
-    row[IDX_BURN] = last[IDX_BURN] + values['fuel flow'] * d_time
+    row[IDX_BURN] = last[IDX_BURN] + d_burn
     row[IDX_FN] = values['net thrust']
     row[IDX_ROCD] = values['rocd']
     row[IDX_DRAG] = values['drag']
     return row
 
 
-def _fuel_flow_points(
+def _interval_fuel_flows(
     rows: list[list[float]], crossover_ft: float
 ) -> list[tuple[float, float]]:
-    """(Altitude [feet], fuel flow [lb/s]) of each climb row above the
+    """(Altitude [feet], fuel flow [lb/s]) of each climb interval above the
     crossover, in row order.
 
-    The fuel flow of a row is the burn over the time of the interval that ends
-    at the row, as the parser stores it. The interval that spans the crossover
-    is skipped, because part of it is at constant CAS. Intervals that span no
-    time are skipped, because they have no defined fuel flow.
+    The average fuel flow of an interval is the fuel flow at its midpoint altitude.
+    The interval that spans the crossover is skipped, because part of it is at
+    constant CAS. Skip intervals that span no time (undefined fuel flow).
     """
     return [
         (
-            row[IDX_ALT],
+            (below[IDX_ALT] + row[IDX_ALT]) / 2,
             (row[IDX_BURN] - below[IDX_BURN]) / (row[IDX_TIME] - below[IDX_TIME]),
         )
         for below, row in zip(rows, rows[1:])

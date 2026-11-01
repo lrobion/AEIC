@@ -255,6 +255,25 @@ def _deltas(values: list[float]) -> list[float]:
     return [diffs[0]] + diffs
 
 
+def _row_fuel_flows(times: list[float], burns: list[float]) -> list[float | None]:
+    """Fuel flow at each row, from the cumulative time and burn columns.
+
+    Central difference of cumulative burn over time.
+    The first and the last rows take the one-sided difference of their only interval.
+
+    A row spanning 0 time is set to None.
+    """
+    n = len(times)
+    if n < 2:
+        return [None] * n
+    result: list[float | None] = []
+    for i in range(n):
+        low, high = max(i - 1, 0), min(i + 1, n - 1)
+        span = times[high] - times[low]
+        result.append(None if span == 0 else (burns[high] - burns[low]) / span)
+    return result
+
+
 def _cross_check_tas(
     label: str,
     tas: list[float],

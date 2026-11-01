@@ -329,16 +329,94 @@ def test_cruise_reference_mach_fills_missing_labels_with_nan(tmp_path, caplog):
 
 
 def test_zero_time_rows_are_dropped(piano_data, caplog):
-    """The fixture's `Time` column repeats values, so most rows span no time
-    and have no defined fuel flow. Of each block's 30 rows, the four at 0,
-    1417, 7086 and 35431 feet are the only ones that advance the clock."""
+    """The fixture's `Time` column repeats values, so the difference of most
+    rows spans no time and they have no defined fuel flow. The clock reads
+    0 s, then 60 s from 1417 feet, 600 s from 7086 feet and 6000 s from 35431
+    feet. A row keeps its fuel flow if the time differs between the rows on
+    each side of it, or between the edge row and its neighbour."""
     for mass in CLIMB_MASSES_KG:
         kept = [row for row in piano_data.climb.data if row[1] == mass]
-        assert [row[0] for row in kept] == [0.0, 14.17, 70.86, 354.31]
+        assert [row[0] for row in kept] == [
+            0.0,
+            14.17,
+            56.69,
+            70.86,
+            340.14,
+            354.31,
+        ]
 
     with caplog.at_level(logging.WARNING, logger='AEIC.parsers.piano_reader'):
         load()
     assert any('spans no time' in r.getMessage() for r in caplog.records)
+
+
+def _first_block_header(path: str) -> str:
+    """The lines of a fixture file up to the first data row of its first
+    block."""
+    lines = config.file_location(path).read_text().splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if 'details' in line)
+    first_row = next(
+        i
+        for i in range(start + 1, len(lines))
+        if lines[i].split() and lines[i].split()[0][0].isdigit()
+    )
+    return ''.join(lines[:first_row])
+
+
+def _rows_text(rows: list[list[float]]) -> str:
+    return ''.join(' '.join(f'{value:10.1f}' for value in row) + '\n' for row in rows)
+
+
+def test_climb_fuel_flow_is_the_central_difference_of_burn(tmp_path):
+    """The burn is B(t) = 2 t + 0.01 t^2 lb at 60 s steps, so the fuel flow
+    is B'(t) = 2 + 0.02 t lb/s. The central difference is exact at the two
+    interior rows: 3.2 lb/s at 60 s and 4.4 lb/s at 120 s. The edge rows take
+    the one-sided difference: 156 lb over the first 60 s, 300 lb over the
+    last 60 s."""
+    # Alt., Time, Dist., Burn, FN/eng, R.o.C., Drag
+    rows = [
+        [0.0, 0.0, 0.0, 0.0, 30000.0, 1000.0, 1000.0],
+        [1000.0, 60.0, 1.0, 156.0, 30000.0, 1000.0, 1000.0],
+        [2000.0, 120.0, 2.0, 384.0, 30000.0, 1000.0, 1000.0],
+        [3000.0, 180.0, 3.0, 684.0, 30000.0, 1000.0, 1000.0],
+    ]
+    climb_file = tmp_path / 'climb.txt'
+    climb_file.write_text(_first_block_header(PIANO_CLIMB_FILE) + _rows_text(rows))
+
+    piano = _load_climb(climb_file, climb_masses_kg=CLIMB_MASSES_KG[:1])
+
+    assert piano.climb.column('fuel_flow') == pytest.approx(
+        [ff * POUNDS_TO_KG for ff in (2.6, 3.2, 4.4, 5.0)]
+    )
+
+
+def test_descent_fuel_flow_is_the_central_difference_of_burn(tmp_path):
+    """The burn is B(t) = 0.4 t + 0.002 t^2 lb at 60 s steps, so the fuel
+    flow is B'(t) = 0.4 + 0.004 t lb/s: 0.64 lb/s at 60 s and 0.88 lb/s at
+    120 s. The edge rows take the one-sided difference: 31.2 lb over the first
+    60 s, 60 lb over the last 60 s. Rows are in flight order, from the top of
+    descent down."""
+    # Alt., Time, Dist., Burn, R.o.D., FN/eng
+    rows = [
+        [29000.0, 0.0, 0.0, 0.0, 1000.0, 1500.0],
+        [28000.0, 60.0, 4.0, 31.2, 1000.0, 1500.0],
+        [27000.0, 120.0, 8.0, 76.8, 1000.0, 1500.0],
+        [26000.0, 180.0, 12.0, 136.8, 1000.0, 1500.0],
+    ]
+    descent_file = tmp_path / 'descent.txt'
+    descent_file.write_text(_first_block_header(PIANO_DESCENT_FILE) + _rows_text(rows))
+
+    piano = PianoData.load(
+        str(config.file_location(PIANO_CRUISE_FILE)),
+        str(config.file_location(PIANO_CLIMB_FILE)),
+        str(descent_file),
+        overrides=PianoOverrides(climb_masses_kg=CLIMB_MASSES_KG),
+    )
+
+    # The table is sorted by flight level, so the bottom row comes first.
+    assert piano.descent.column('fuel_flow') == pytest.approx(
+        [ff * POUNDS_TO_KG for ff in (1.0, 0.88, 0.64, 0.52)]
+    )
 
 
 def test_cruise_row_units(piano_data):
@@ -591,8 +669,9 @@ def _fuel_flow_lbps(h: float) -> float:
 def _synthetic_rows(altitudes_ft: list[float]) -> list[list[float]]:
     """Climb rows in PIANO units on known functions of altitude.
 
-    Each interval takes 100 s, and burns the fuel flow at its upper row over
-    that time, so the backward-difference fuel flow of each row is exact. The
+    Each interval takes 100 s, and burns the fuel flow at its midpoint
+    altitude over that time. The fuel flow is linear in altitude, so the
+    average fuel flow of each interval is the fuel flow at its midpoint. The
     first row is off every trend, so a fit that uses it fails the tests.
     """
     first = [0.0] * _CLIMB_ROW_COLS
@@ -607,7 +686,8 @@ def _synthetic_rows(altitudes_ft: list[float]) -> list[list[float]]:
         row[IDX_ALT] = h
         row[IDX_TIME] = below[IDX_TIME] + 100.0
         row[IDX_DIST] = below[IDX_DIST] + 10.0
-        row[IDX_BURN] = below[IDX_BURN] + 100.0 * _fuel_flow_lbps(h)
+        midpoint = (below[IDX_ALT] + h) / 2
+        row[IDX_BURN] = below[IDX_BURN] + 100.0 * _fuel_flow_lbps(midpoint)
         row[IDX_FN] = _fn_lbf(h)
         row[IDX_ROCD] = _rocd_fpm(h)
         row[IDX_DRAG] = _drag_lbf(h)
@@ -618,7 +698,7 @@ def _synthetic_rows(altitudes_ft: list[float]) -> list[list[float]]:
 def test_extrapolate_to_halt_follows_the_fitted_forms():
     """Rate of climb, thrust and fuel flow are linear and drag is quadratic,
     so the extrapolation reproduces them. Time is the integral of dh / ROCD,
-    and burn is the fuel flow times that time."""
+    and burn is the integral of the fuel flow over that time."""
     rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0, 34000.0])
 
     row = _extrapolate_to_halt('block', rows, 35000.0, SCHEDULE)
@@ -633,9 +713,10 @@ def test_extrapolate_to_halt_follows_the_fitted_forms():
     # dh / ROCD for a rate of climb linear from 400 to 200 ft/min over 1000 ft.
     d_time = 60.0 * 1000.0 / (200.0 - 400.0) * math.log(200.0 / 400.0)
     assert row[IDX_TIME] == pytest.approx(last[IDX_TIME] + d_time, rel=1e-4)
-    assert row[IDX_BURN] == pytest.approx(
-        last[IDX_BURN] + _fuel_flow_lbps(35000.0) * d_time, rel=1e-4
-    )
+    # Integral of FF dh / ROCD, with u = h - 31000 feet from 3000 to 4000:
+    # (2 - 1e-4 u) / (1000 - 0.2 u) = 5e-4 + 1.5 / (1000 - 0.2 u).
+    d_burn = 60.0 * (5e-4 * 1000.0 + 1.5 / 0.2 * math.log(400.0 / 200.0))
+    assert row[IDX_BURN] == pytest.approx(last[IDX_BURN] + d_burn, rel=1e-4)
 
     # The climb is at constant Mach and close to level, so the ground speed is
     # close to the TAS at the middle of the step.
@@ -648,9 +729,9 @@ def test_extrapolate_to_halt_follows_the_fitted_forms():
 
 def test_extrapolate_to_halt_needs_two_usable_fuel_flows(caplog):
     """Three rows are above the crossover, so rate of climb, thrust and drag
-    could be fitted. But the fuel flow of the first one is the burn over an
-    interval that starts below the crossover, and the last interval spans no
-    time. No usable fuel flow is left but one, which is too few to fit."""
+    could be fitted. But the first of their intervals starts below the
+    crossover, and the last interval spans no time. Only one interval is left
+    for the fuel flow, which is too few to fit."""
     rows = _synthetic_rows([30000.0, 31000.0, 32000.0, 33000.0])
     rows[-1][IDX_TIME] = rows[-2][IDX_TIME]
 
