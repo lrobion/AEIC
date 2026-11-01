@@ -70,6 +70,20 @@ _ALL_VALUES = [Interval(-math.inf, math.inf)]
 coordinates."""
 
 
+def query_fl(altitude: float) -> float:
+    """Flight level of a query altitude [m], rounded to 1e-9."""
+    # Round FL to 1e-9 because the metric altitude for an FL
+    # does not convert exactly back to the FL which can cause
+    # out of bounds issues in the interpolator e.g.:
+    # FL400 => Meters => FL 400 + 1e-15
+    # And if interpolator bound is at FL400, this point
+    # would be considered out of bounds even though is it not really
+    # TODO 1e-9 works because FL in performance tables (BADA/PIANO)
+    # have at most 2-3 decimals, if they had 10 this rounding would fail
+    # to snap the points correctly to the interpolation grid
+    return round(altitude * METERS_TO_FL, 9)
+
+
 def _bracket(
     axis_values: list[float], coord: float, snap_to_node: bool = False
 ) -> tuple[int, int, float]:
@@ -566,16 +580,7 @@ class RaggedPerformanceTable:
                 f'got {sorted(extra_coords)}'
             )
 
-        # Round FL to 1e-9 because the metric altitude for an FL
-        # does not convert exactly back to the FL which can cause
-        # out of bounds issues in the interpolator e.g.:
-        # FL400 => Meters => FL 400 + 1e-15
-        # And if interpolator bound is at FL400, this point
-        # would be considered out of bounds even though is it not really
-        # TODO 1e-9 works because FL in performance tables (BADA/PIANO)
-        # have at most 2-3 decimals, if they had 10 this rounding would fail
-        # to snap the points correctly to the interpolation grid
-        fl = round(state.altitude * METERS_TO_FL, 9)
+        fl = query_fl(state.altitude)
 
         # In a ragged table, the lightest or heaviest mass of the whole table
         # can be outside the data at this FL and Mach. So resolve 'min' and

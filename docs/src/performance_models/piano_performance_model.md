@@ -57,12 +57,25 @@ provide the `fuel_flow`, `fl`, `tas`, `rocd` and `mass` columns.
 Row ordering in a generated file is by `(mass, fl)` for climb and descent, and
 by `(mass, fl, mach)` for cruise.
 
+### Mass of climb and descent queries
+
+In the climb and descent tables, `mass` is the initial mass of a PIANO profile (block).
+PIANO flies one climb or descent from each initial mass in the table, so a
+row's values are for the current mass `initial_mass - burn`. At the query
+flight level, the conversion finds the two neighbouring initial masses
+whose current masses are on each side of the query mass. It then interpolates
+the initial mass between them.
+
+The valid current aircraft masses at a flight level during climb/descent
+therefore go from the current mass at that FL of the lightest profile to that of
+the heaviest profile. A query outside this range raises `ValueError`.
+
 ### Climb table
 
 | Column | Unit | Meaning |
 |--------|------|---------|
 | `fl` | flight level | Altitude. |
-| `mass` | kg | Aircraft mass, the block's initial mass. |
+| `mass` | kg | Initial mass of the block. |
 | `tas` | m/s | True airspeed, derived from the airspeed schedule. |
 | `rocd` | m/s | Rate of climb. |
 | `fuel_flow` | kg/s | Fuel flow at the row, central difference of burn over time. |
@@ -106,7 +119,7 @@ In this case, the operating point value is kept over the Mach sweep.
 | Column | Unit | Meaning |
 |--------|------|---------|
 | `fl` | flight level | Altitude. |
-| `mass` | kg | Aircraft mass. |
+| `mass` | kg | Initial mass of the block. |
 | `tas` | m/s | True airspeed, derived from the airspeed schedule. |
 | `rocd` | m/s | Rate of descent, negative. |
 | `fuel_flow` | kg/s | Fuel flow at the row, central difference of burn over time. |

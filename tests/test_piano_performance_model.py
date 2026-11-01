@@ -174,13 +174,18 @@ def _assert_tabulated(perf: Performance, row: dict[str, float]):
         ('descent_flight_performance', SimpleFlightRules.DESCEND),
     ],
 )
-def test_evaluate_at_every_climb_or_descent_row_returns_the_tabulated_values(
+def test_evaluate_at_the_current_mass_of_a_block_row_returns_the_row(
     build, table_name, rules
 ):
     model = build()
 
+    # The table mass is the initial mass of the block. The aircraft at a row
+    # has burned the row's fuel, so it is that much lighter.
     for row in _rows(getattr(model, table_name)):
-        _assert_tabulated(model.evaluate(_state(row), rules), row)
+        state = AircraftState(
+            altitude=row['fl'] / METERS_TO_FL, aircraft_mass=row['mass'] - row['burn']
+        )
+        _assert_tabulated(model.evaluate(state, rules), row)
 
 
 def test_evaluate_at_every_cruise_row_returns_the_tabulated_values(build):
@@ -258,14 +263,12 @@ def test_simple_cruise_rules_are_refused_with_a_pointer_to_cruise_mach(build):
 def test_altitude_above_the_climb_table_is_refused(build):
     model = build()
     top_fl = max(model.climb_flight_performance.column('fl'))
-    # Using aircraft_mass='min' would trigger an earlier check
-    # that would fail because top_fl+10 is outside of the valid
-    # range for that minimum mass, so we bypass it for the purpose
-    # of this test
     state = AircraftState(
         altitude=(top_fl + 10) / METERS_TO_FL,
         aircraft_mass=min(model.climb_flight_performance.column('mass')),
     )
 
-    with pytest.raises(ValueError, match='climb table: fl='):
+    with pytest.raises(
+        ValueError, match='climb table: no tabulated initial masses reach fl='
+    ):
         model.evaluate(state, SimpleFlightRules.CLIMB)
